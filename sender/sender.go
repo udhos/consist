@@ -191,8 +191,7 @@ func (s *Sender) uploadCurrentPart(ctx context.Context) error {
 
 	s.partNum++
 	partLen := s.batchBuf.Len()
-	payload := make([]byte, partLen)
-	copy(payload, s.batchBuf.Bytes())
+	payload := s.batchBuf.Bytes()
 
 	out, err := s.options.Client.UploadPart(ctx, &s3.UploadPartInput{
 		Bucket:     &s.options.Bucket,
@@ -212,8 +211,7 @@ func (s *Sender) uploadCurrentPart(ctx context.Context) error {
 
 	s.totalBatchB += partLen
 	s.batchBuf.Reset()
-	enc, _ := wagon.NewEncoder(&s.batchBuf)
-	s.encoder = enc
+	s.encoder.Reset(&s.batchBuf)
 
 	return nil
 }
@@ -257,8 +255,7 @@ func (s *Sender) flush() {
 	}
 
 	s.batchBuf.Reset()
-	enc, _ := wagon.NewEncoder(&s.batchBuf)
-	s.encoder = enc
+	s.encoder.Reset(&s.batchBuf)
 	s.uploadID = ""
 	s.key = ""
 	s.completed = nil
@@ -317,8 +314,7 @@ func (s *Sender) flushWithContext(ctx context.Context) {
 	s.results <- Result{LastSeq: s.seq, Err: uploadErr}
 
 	s.batchBuf.Reset()
-	enc, _ := wagon.NewEncoder(&s.batchBuf)
-	s.encoder = enc
+	s.encoder.Reset(&s.batchBuf)
 	s.uploadID = ""
 	s.key = ""
 	s.completed = nil

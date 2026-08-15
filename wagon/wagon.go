@@ -54,6 +54,15 @@ func NewEncoder(w io.Writer, opts ...Options) (*Encoder, error) {
 	return &Encoder{w: w, options: options}, nil
 }
 
+// Reset reinitializes the encoder to write to the provided writer.
+func (e *Encoder) Reset(w io.Writer) {
+	e.w = w
+	e.headerWrote = false
+	e.tlvBuf.Reset()
+	e.kvBuf.Reset()
+	e.numBuf = [32]byte{}
+}
+
 // Encode writes a single Message record to the stream.
 func (e *Encoder) Encode(msg Message) error {
 	if !e.headerWrote {
