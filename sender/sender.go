@@ -6,11 +6,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/segmentio/ksuid"
 	"github.com/udhos/consist/wagon"
 )
 
@@ -169,7 +171,7 @@ func (s *Sender) ensureMultipartStarted(ctx context.Context) error {
 	if s.uploadID != "" {
 		return nil
 	}
-	s.key = fmt.Sprintf("%s/%d.batch", s.options.Prefix, time.Now().UnixNano())
+	s.key = batchObjectKey(s.options.Prefix, time.Now())
 	out, err := s.options.Client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
 		Bucket: &s.options.Bucket,
 		Key:    &s.key,
@@ -181,6 +183,33 @@ func (s *Sender) ensureMultipartStarted(ctx context.Context) error {
 		s.uploadID = *out.UploadId
 	}
 	return nil
+}
+
+func batchObjectKey(prefix string, now time.Time) string {
+	now = now.UTC()
+	base := strings.Trim(prefix, "/")
+	if base == "" {
+		return fmt.Sprintf("%s/%s/%s/%s/%s.batch",
+			now.Format("2006-01"),
+			now.Format("02"),
+			now.Format("15"),
+			now.Format("04"),
+			randomBatchSuffix(),
+		)
+	}
+
+	return fmt.Sprintf("%s/%s/%s/%s/%s/%s.batch",
+		base,
+		now.Format("2006-01"),
+		now.Format("02"),
+		now.Format("15"),
+		now.Format("04"),
+		randomBatchSuffix(),
+	)
+}
+
+func randomBatchSuffix() string {
+	return ksuid.New().String()
 }
 
 func (s *Sender) uploadCurrentPart(ctx context.Context) error {

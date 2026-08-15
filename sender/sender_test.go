@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"regexp"
 	"testing"
 	"time"
 
@@ -18,11 +19,15 @@ type mockS3Client struct {
 	uploadedParts [][]byte
 	uploadedBytes [][]byte
 	injectError   error
+	keys          []string
 }
 
-func (m *mockS3Client) CreateMultipartUpload(_ context.Context, _ *s3.CreateMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error) {
+func (m *mockS3Client) CreateMultipartUpload(_ context.Context, params *s3.CreateMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error) {
 	if m.injectError != nil {
 		return nil, m.injectError
+	}
+	if params != nil && params.Key != nil {
+		m.keys = append(m.keys, *params.Key)
 	}
 	uploadID := "mock-upload-id"
 	m.uploadedParts = nil
@@ -57,6 +62,35 @@ func (m *mockS3Client) CompleteMultipartUpload(_ context.Context, _ *s3.Complete
 func (m *mockS3Client) AbortMultipartUpload(_ context.Context, _ *s3.AbortMultipartUploadInput, _ ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
 	m.uploadedParts = nil
 	return &s3.AbortMultipartUploadOutput{}, nil
+}
+
+func TestSender_UsesDocumentedBatchKeyStructure(t *testing.T) {
+	mockClient := &mockS3Client{}
+	s, err := sender.NewSender(sender.Options{
+		Client: mockClient,
+		Bucket: "my-bucket",
+		Prefix: "my-prefix",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating sender: %v", err)
+	}
+
+	if _, err := s.Send(bytes.NewReader([]byte("hello world"))); err != nil {
+		t.Fatalf("unexpected error sending payload: %v", err)
+	}
+
+	if err := s.Close(context.Background()); err != nil {
+		t.Fatalf("unexpected close error: %v", err)
+	}
+
+	if len(mockClient.keys) == 0 {
+		t.Fatal("expected at least one S3 key to be created")
+	}
+
+	pattern := regexp.MustCompile(`^my-prefix/\d{4}-\d{2}/\d{2}/\d{2}/\d{2}/[A-Za-z0-9]+\.batch$`)
+	if !pattern.MatchString(mockClient.keys[0]) {
+		t.Fatalf("expected S3 key to match documented batch structure, got %q", mockClient.keys[0])
+	}
 }
 
 func TestSender_BasicUsage(t *testing.T) {

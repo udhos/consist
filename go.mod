@@ -2,7 +2,10 @@ module github.com/udhos/consist
 
 go 1.26.6
 
-require github.com/aws/aws-sdk-go-v2/service/s3 v1.107.2
+require (
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.107.2
+	github.com/segmentio/ksuid v1.0.4
+)
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.43.6 // indirect
