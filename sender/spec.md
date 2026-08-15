@@ -28,6 +28,9 @@ type Result struct {
 ```
 - `LastSeq`: The sequence ID of the last message in the completed batch. If `Err` is `nil`, all sequence numbers up to `LastSeq` are confirmed safely stored on S3.
 - `Err`: Contains any storage/upload error encountered while persisting the batch.
+- If `Err != nil`, the batch is not guaranteed durable and the sender should treat all sequence IDs after the last confirmed successful batch as retryable.
+- A successful `Close(ctx)` still emits a final `Result` for any pending buffered batch before the result channel is closed.
+- Once the sender is closed, no further `Result` values are emitted and no further `Send()` calls are valid.
 
 #### `Options`
 Configures the `Sender` instance, target storage, and batch limits.
@@ -40,6 +43,7 @@ type Options struct {
     MaxBatchBytes    int           // Max bytes per batch before flush (default: 100MB)
     MaxBatchTime     time.Duration // Max duration a batch can remain open before flush (default: 1s)
     MaxClientSilence time.Duration // Max inactivity duration after Send() before flush (default: 500ms)
+    MinPartBytes     int           // Minimum accumulated buffer size before uploading a multipart part (default: 10MB)
 }
 ```
 
@@ -47,6 +51,7 @@ Default values applied when unspecified or zero:
 - `MaxBatchBytes`: `100 * 1024 * 1024` (100 MB)
 - `MaxBatchTime`: `1 * time.Second` (1 second)
 - `MaxClientSilence`: `500 * time.Millisecond` (500 milliseconds)
+- `MinPartBytes`: `10 * 1024 * 1024` (10 MB)
 
 #### `S3Client`
 Minimal S3 interface used by `Sender` for upload operations.
@@ -87,8 +92,11 @@ func (s *Sender) Results() <-chan Result
 ```go
 func (s *Sender) Close(ctx context.Context) error
 ```
-- Flushes any pending buffered messages.
-- Completes active S3 uploads and closes internal channels.
+- Flushes any pending buffered messages and forces the current batch to finalize.
+- Completes active S3 uploads using the provided context.
+- Emits the final `Result` for the remaining buffered sequences if any are pending.
+- Closes internal channels only after the final flush result has been emitted.
+- `Close(ctx)` is a terminal operation: after it returns, the sender is closed and no further `Send()` calls are valid.
 
 ## Batch Flush Triggers
 
@@ -96,4 +104,6 @@ A batch is finalized and uploaded when any of the following conditions are met:
 1. **Max Size**: Cumulative batch size reaches configured byte limit.
 2. **Max Time**: Batch open duration exceeds time limit.
 3. **Client Silence**: Inactivity duration since last `Send()` exceeds silence limit.
-4. **Sender Close**: `Close(ctx)` is called.
+4. **Explicit Close**: `Close(ctx)` is called to force a final flush of any remaining buffered records.
+
+The first three cases are automatic batch flush conditions. `Close(ctx)` is a controlled shutdown/finalization operation that emits the last result for the remaining buffer before the sender is closed.
