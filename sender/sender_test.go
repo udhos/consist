@@ -95,6 +95,9 @@ func TestSender_CompletedPartsAreOrdered(t *testing.T) {
 	if len(mockClient.completedPartNumbers) != 1 {
 		t.Fatalf("expected one completed multipart upload, got %d", len(mockClient.completedPartNumbers))
 	}
+	if len(mockClient.completedPartNumbers[0]) != 3 {
+		t.Fatalf("expected three completed parts, got %d", len(mockClient.completedPartNumbers[0]))
+	}
 	for i, partNumber := range mockClient.completedPartNumbers[0] {
 		expected := int32(i + 1)
 		if partNumber != expected {
