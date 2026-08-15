@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
 	"regexp"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/udhos/consist/sender"
 	"github.com/udhos/consist/wagon"
@@ -16,10 +18,11 @@ import (
 // mockS3Client provides a simple mock implementation of sender.S3Client for testing.
 type mockS3Client struct {
 	sender.S3Client
-	uploadedParts [][]byte
-	uploadedBytes [][]byte
-	injectError   error
-	keys          []string
+	uploadedParts        [][]byte
+	uploadedBytes        [][]byte
+	injectError          error
+	keys                 []string
+	completedPartNumbers [][]int32
 }
 
 func (m *mockS3Client) CreateMultipartUpload(_ context.Context, params *s3.CreateMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error) {
@@ -46,10 +49,19 @@ func (m *mockS3Client) UploadPart(_ context.Context, params *s3.UploadPartInput,
 	return &s3.UploadPartOutput{ETag: &etag}, nil
 }
 
-func (m *mockS3Client) CompleteMultipartUpload(_ context.Context, _ *s3.CompleteMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error) {
+func (m *mockS3Client) CompleteMultipartUpload(_ context.Context, params *s3.CompleteMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error) {
 	if m.injectError != nil {
 		return nil, m.injectError
 	}
+	var partNumbers []int32
+	if params.MultipartUpload != nil {
+		for _, part := range params.MultipartUpload.Parts {
+			if part.PartNumber != nil {
+				partNumbers = append(partNumbers, *part.PartNumber)
+			}
+		}
+	}
+	m.completedPartNumbers = append(m.completedPartNumbers, partNumbers)
 	var fullFile []byte
 	for _, part := range m.uploadedParts {
 		fullFile = append(fullFile, part...)
@@ -57,6 +69,38 @@ func (m *mockS3Client) CompleteMultipartUpload(_ context.Context, _ *s3.Complete
 	m.uploadedBytes = append(m.uploadedBytes, fullFile)
 	m.uploadedParts = nil
 	return &s3.CompleteMultipartUploadOutput{}, nil
+}
+
+func TestSender_CompletedPartsAreOrdered(t *testing.T) {
+	mockClient := &mockS3Client{}
+	s, err := sender.NewSender(sender.Options{
+		Client:        mockClient,
+		Bucket:        "my-bucket",
+		MinPartBytes:  20,
+		MaxBatchBytes: 1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating sender: %v", err)
+	}
+
+	for range 3 {
+		if _, err := s.Send(bytes.NewReader(bytes.Repeat([]byte("x"), 100))); err != nil {
+			t.Fatalf("unexpected send error: %v", err)
+		}
+	}
+	if err := s.Close(context.Background()); err != nil {
+		t.Fatalf("unexpected close error: %v", err)
+	}
+
+	if len(mockClient.completedPartNumbers) != 1 {
+		t.Fatalf("expected one completed multipart upload, got %d", len(mockClient.completedPartNumbers))
+	}
+	for i, partNumber := range mockClient.completedPartNumbers[0] {
+		expected := int32(i + 1)
+		if partNumber != expected {
+			t.Fatalf("expected part %d at position %d, got %d", expected, i, partNumber)
+		}
+	}
 }
 
 func (m *mockS3Client) AbortMultipartUpload(_ context.Context, _ *s3.AbortMultipartUploadInput, _ ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
@@ -462,6 +506,60 @@ func BenchmarkSender_Send_10k_10KB(b *testing.B) {
 		}
 
 		_ = s.Close(context.Background())
+	}
+
+	b.SetBytes(int64(10000 * 10000))
+}
+
+func BenchmarkSender_Send_10k_10KB_AWS(b *testing.B) {
+	bucket := os.Getenv("CONSIST_BENCH_BUCKET")
+	if bucket == "" {
+		b.Skip("set CONSIST_BENCH_BUCKET to run the real AWS benchmark")
+	}
+
+	awsConfig, err := config.LoadDefaultConfig(context.Background())
+	if err != nil {
+		b.Fatalf("load AWS config: %v", err)
+	}
+	client := s3.NewFromConfig(awsConfig)
+	payload := make([]byte, 10000)
+	for i := range payload {
+		payload[i] = byte(i % 256)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for n := 0; n < b.N; n++ {
+		s, err := sender.NewSender(sender.Options{
+			Client:        client,
+			Bucket:        bucket,
+			Prefix:        "consist",
+			MaxBatchBytes: 100 * 1024 * 1024,
+		})
+		if err != nil {
+			b.Fatalf("create sender: %v", err)
+		}
+
+		go func() {
+			for res := range s.Results() {
+				if res.Err != nil {
+					b.Errorf("upload batch: %v", res.Err)
+				}
+			}
+		}()
+
+		r := bytes.NewReader(payload)
+		for range 10000 {
+			r.Reset(payload)
+			if _, err := s.Send(r); err != nil {
+				b.Fatalf("send: %v", err)
+			}
+		}
+
+		if err := s.Close(context.Background()); err != nil {
+			b.Fatalf("close sender: %v", err)
+		}
 	}
 
 	b.SetBytes(int64(10000 * 10000))

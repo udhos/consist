@@ -60,6 +60,7 @@ type Sender struct {
 	completed   []types.CompletedPart
 	partNum     int32
 	totalBatchB int
+	stateMu     sync.Mutex
 	closeOnce   sync.Once
 	closed      chan struct{}
 }
@@ -114,6 +115,7 @@ func (s *Sender) timerLoop() {
 		case <-s.timerStop:
 			return
 		case <-ticker.C:
+			s.stateMu.Lock()
 			now := time.Now()
 			if s.batchBuf.Len() > 0 {
 				timeExceeded := !s.batchStart.IsZero() && now.Sub(s.batchStart) >= s.options.MaxBatchTime
@@ -123,6 +125,7 @@ func (s *Sender) timerLoop() {
 					s.flush()
 				}
 			}
+			s.stateMu.Unlock()
 		}
 	}
 }
@@ -131,6 +134,9 @@ func (s *Sender) timerLoop() {
 // and returns its assigned sequence ID.
 // Note: Sender is not concurrency-safe and must be used by a single goroutine.
 func (s *Sender) Send(r io.Reader) (uint64, error) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+
 	s.readBuf.Reset()
 	if _, err := io.Copy(&s.readBuf, r); err != nil {
 		return 0, fmt.Errorf("read payload: %w", err)
@@ -221,6 +227,7 @@ func (s *Sender) uploadCurrentPart(ctx context.Context) error {
 	}
 
 	s.partNum++
+	partNum := s.partNum
 	partLen := s.batchBuf.Len()
 	payload := s.batchBuf.Bytes()
 
@@ -228,7 +235,7 @@ func (s *Sender) uploadCurrentPart(ctx context.Context) error {
 		Bucket:     &s.options.Bucket,
 		Key:        &s.key,
 		UploadId:   &s.uploadID,
-		PartNumber: &s.partNum,
+		PartNumber: &partNum,
 		Body:       bytes.NewReader(payload),
 	})
 	if err != nil {
@@ -237,7 +244,7 @@ func (s *Sender) uploadCurrentPart(ctx context.Context) error {
 
 	s.completed = append(s.completed, types.CompletedPart{
 		ETag:       out.ETag,
-		PartNumber: &s.partNum,
+		PartNumber: &partNum,
 	})
 
 	s.totalBatchB += partLen
@@ -306,6 +313,8 @@ func (s *Sender) Close(ctx context.Context) error {
 	s.closeOnce.Do(func() {
 		close(s.timerStop)
 		<-s.timerDone
+		s.stateMu.Lock()
+		defer s.stateMu.Unlock()
 		if s.totalBatchB > 0 || s.batchBuf.Len() > 0 {
 			s.flushWithContext(ctx)
 		}
