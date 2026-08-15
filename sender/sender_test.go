@@ -1,0 +1,434 @@
+package sender_test
+
+import (
+	"bytes"
+	"context"
+	"io"
+	"testing"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/udhos/consist/sender"
+	"github.com/udhos/consist/wagon"
+)
+
+// mockS3Client provides a simple mock implementation of sender.S3Client for testing.
+type mockS3Client struct {
+	sender.S3Client
+	uploadedParts [][]byte
+	uploadedBytes [][]byte
+	injectError   error
+}
+
+func (m *mockS3Client) CreateMultipartUpload(_ context.Context, _ *s3.CreateMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error) {
+	if m.injectError != nil {
+		return nil, m.injectError
+	}
+	uploadID := "mock-upload-id"
+	m.uploadedParts = nil
+	return &s3.CreateMultipartUploadOutput{UploadId: &uploadID}, nil
+}
+
+func (m *mockS3Client) UploadPart(_ context.Context, params *s3.UploadPartInput, _ ...func(*s3.Options)) (*s3.UploadPartOutput, error) {
+	if m.injectError != nil {
+		return nil, m.injectError
+	}
+	etag := "mock-etag"
+	if params.Body != nil {
+		buf, _ := io.ReadAll(params.Body)
+		m.uploadedParts = append(m.uploadedParts, buf)
+	}
+	return &s3.UploadPartOutput{ETag: &etag}, nil
+}
+
+func (m *mockS3Client) CompleteMultipartUpload(_ context.Context, _ *s3.CompleteMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error) {
+	if m.injectError != nil {
+		return nil, m.injectError
+	}
+	var fullFile []byte
+	for _, part := range m.uploadedParts {
+		fullFile = append(fullFile, part...)
+	}
+	m.uploadedBytes = append(m.uploadedBytes, fullFile)
+	m.uploadedParts = nil
+	return &s3.CompleteMultipartUploadOutput{}, nil
+}
+
+func (m *mockS3Client) AbortMultipartUpload(_ context.Context, _ *s3.AbortMultipartUploadInput, _ ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
+	m.uploadedParts = nil
+	return &s3.AbortMultipartUploadOutput{}, nil
+}
+
+func TestSender_BasicUsage(t *testing.T) {
+	mockClient := &mockS3Client{}
+	s, err := sender.NewSender(sender.Options{
+		Client: mockClient,
+		Bucket: "my-bucket",
+		Prefix: "my-prefix",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating sender: %v", err)
+	}
+
+	// 1. Send first message payload
+	msg1 := bytes.NewReader([]byte("hello world"))
+	seq1, err := s.Send(msg1)
+	if err != nil {
+		t.Fatalf("unexpected error sending msg1: %v", err)
+	}
+	if seq1 == 0 {
+		t.Errorf("expected non-zero sequence ID for first message, got %d", seq1)
+	}
+
+	// 2. Send second message payload
+	msg2 := bytes.NewReader([]byte("foo bar"))
+	seq2, err := s.Send(msg2)
+	if err != nil {
+		t.Fatalf("unexpected error sending msg2: %v", err)
+	}
+	if seq2 != seq1+1 {
+		t.Errorf("expected monotonic sequence ID %d, got %d", seq1+1, seq2)
+	}
+
+	// 3. Clean up sender
+	ctx := context.Background()
+	if err := s.Close(ctx); err != nil {
+		t.Fatalf("unexpected error closing sender: %v", err)
+	}
+}
+
+func TestSender_AsyncResults(t *testing.T) {
+	mockClient := &mockS3Client{}
+	s, err := sender.NewSender(sender.Options{
+		Client: mockClient,
+		Bucket: "my-bucket",
+		Prefix: "my-prefix",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating sender: %v", err)
+	}
+
+	const totalMsgs = 50
+	var lastAckSeq uint64
+
+	// Goroutine consuming asynchronous batch ACK results
+	ackDone := make(chan struct{})
+	go func() {
+		defer close(ackDone)
+		for res := range s.Results() {
+			if res.Err != nil {
+				t.Errorf("unexpected batch error: %v", res.Err)
+				return
+			}
+			lastAckSeq = res.LastSeq
+		}
+	}()
+
+	// Producer loop sending messages
+	for i := 1; i <= totalMsgs; i++ {
+		payload := bytes.NewReader([]byte("message payload"))
+		seq, err := s.Send(payload)
+		if err != nil {
+			t.Fatalf("unexpected send error on msg %d: %v", i, err)
+		}
+		if seq != uint64(i) {
+			t.Fatalf("expected sequence %d, got %d", i, seq)
+		}
+	}
+
+	// Close sender to flush final batch and close results channel
+	if err := s.Close(context.Background()); err != nil {
+		t.Fatalf("unexpected close error: %v", err)
+	}
+
+	// Wait for ack reader loop to complete
+	<-ackDone
+
+	if lastAckSeq != totalMsgs {
+		t.Errorf("expected last acknowledged sequence %d, got %d", totalMsgs, lastAckSeq)
+	}
+}
+
+func TestSender_BatchSizeLimit(t *testing.T) {
+	mockClient := &mockS3Client{}
+
+	s, err := sender.NewSender(sender.Options{
+		Client:        mockClient,
+		Bucket:        "my-bucket",
+		Prefix:        "my-prefix",
+		MaxBatchBytes: 15,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating sender: %v", err)
+	}
+
+	// Channel to receive flushed results synchronously in test
+	resultsCh := make(chan sender.Result, 10)
+
+	// Collect results from s.Results()
+	ackDone := make(chan struct{})
+	go func() {
+		defer close(ackDone)
+		for res := range s.Results() {
+			resultsCh <- res
+		}
+	}()
+
+	payload1 := bytes.NewReader([]byte("payload one 12345"))
+	seq1, err := s.Send(payload1)
+	if err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+
+	// Payload 1 (~25 bytes encoded) crosses 15 byte threshold -> triggers immediate flush!
+	res1 := <-resultsCh
+	if res1.LastSeq != seq1 {
+		t.Errorf("expected flushed LastSeq %d, got %d", seq1, res1.LastSeq)
+	}
+
+	payload2 := bytes.NewReader([]byte("payload two 67890"))
+	seq2, err := s.Send(payload2)
+	if err != nil {
+		t.Fatalf("send 2: %v", err)
+	}
+
+	res2 := <-resultsCh
+	if res2.LastSeq != seq2 {
+		t.Errorf("expected flushed LastSeq %d, got %d", seq2, res2.LastSeq)
+	}
+
+	if err := s.Close(context.Background()); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	<-ackDone
+}
+
+func TestSender_MaxBatchTime(t *testing.T) {
+	mockClient := &mockS3Client{}
+
+	s, err := sender.NewSender(sender.Options{
+		Client:           mockClient,
+		Bucket:           "my-bucket",
+		Prefix:           "my-prefix",
+		MaxBatchBytes:    1024 * 1024,
+		MaxBatchTime:     100 * time.Millisecond,
+		MaxClientSilence: 10 * time.Second, // disable silence check for this test
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating sender: %v", err)
+	}
+
+	resultsCh := make(chan sender.Result, 10)
+	ackDone := make(chan struct{})
+	go func() {
+		defer close(ackDone)
+		for res := range s.Results() {
+			resultsCh <- res
+		}
+	}()
+
+	// Send single message (well under MaxBatchBytes)
+	payload := bytes.NewReader([]byte("time test payload"))
+	seq, err := s.Send(payload)
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	// Verify flush happens automatically via timer (within 300ms) without calling Close() or exceeding size
+	select {
+	case res := <-resultsCh:
+		if res.LastSeq != seq {
+			t.Errorf("expected LastSeq %d, got %d", seq, res.LastSeq)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for batch flush on MaxBatchTime")
+	}
+
+	if err := s.Close(context.Background()); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	<-ackDone
+}
+
+func TestSender_MaxClientSilence(t *testing.T) {
+	mockClient := &mockS3Client{}
+
+	// Set short MaxClientSilence (100ms) and long MaxBatchTime (10s)
+	s, err := sender.NewSender(sender.Options{
+		Client:           mockClient,
+		Bucket:           "my-bucket",
+		Prefix:           "my-prefix",
+		MaxBatchBytes:    1024 * 1024,
+		MaxBatchTime:     10 * time.Second, // disable batch time trigger
+		MaxClientSilence: 100 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating sender: %v", err)
+	}
+
+	resultsCh := make(chan sender.Result, 10)
+	ackDone := make(chan struct{})
+	go func() {
+		defer close(ackDone)
+		for res := range s.Results() {
+			resultsCh <- res
+		}
+	}()
+
+	// Send a payload
+	payload := bytes.NewReader([]byte("silence test payload"))
+	seq, err := s.Send(payload)
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	// Verify flush happens automatically due to client inactivity (within ~300ms)
+	select {
+	case res := <-resultsCh:
+		if res.LastSeq != seq {
+			t.Errorf("expected LastSeq %d, got %d", seq, res.LastSeq)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for batch flush on MaxClientSilence")
+	}
+
+	if err := s.Close(context.Background()); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	<-ackDone
+}
+
+func TestSender_CloseIsIdempotent(t *testing.T) {
+	mockClient := &mockS3Client{}
+	s, err := sender.NewSender(sender.Options{
+		Client: mockClient,
+		Bucket: "my-bucket",
+		Prefix: "my-prefix",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating sender: %v", err)
+	}
+
+	if _, err := s.Send(bytes.NewReader([]byte("hello"))); err != nil {
+		t.Fatalf("unexpected send error: %v", err)
+	}
+
+	if err := s.Close(context.Background()); err != nil {
+		t.Fatalf("unexpected close error: %v", err)
+	}
+
+	if err := s.Close(context.Background()); err != nil {
+		t.Fatalf("second close should be a no-op: %v", err)
+	}
+}
+
+func TestSender_ValidWagonFormat(t *testing.T) {
+	mockClient := &mockS3Client{}
+
+	s, err := sender.NewSender(sender.Options{
+		Client: mockClient,
+		Bucket: "my-bucket",
+		Prefix: "my-prefix",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating sender: %v", err)
+	}
+
+	messages := [][]byte{
+		[]byte("first test payload"),
+		[]byte("second test payload"),
+		[]byte("third test payload"),
+	}
+
+	for _, msg := range messages {
+		if _, err := s.Send(bytes.NewReader(msg)); err != nil {
+			t.Fatalf("unexpected send error: %v", err)
+		}
+	}
+
+	if err := s.Close(context.Background()); err != nil {
+		t.Fatalf("unexpected close error: %v", err)
+	}
+
+	if len(mockClient.uploadedBytes) != 1 {
+		t.Fatalf("expected 1 uploaded batch file, got %d", len(mockClient.uploadedBytes))
+	}
+
+	uploadedData := mockClient.uploadedBytes[0]
+
+	// Parse uploaded bytes using wagon.NewDecoder
+	dec, err := wagon.NewDecoder(bytes.NewReader(uploadedData))
+	if err != nil {
+		t.Fatalf("failed to decode uploaded wagon format: %v", err)
+	}
+
+	var decodedMsgs []wagon.Message
+	for {
+		var msg wagon.Message
+		err := dec.Decode(&msg)
+		if err != nil {
+			if io.EOF == err || errorsIsEOF(err) {
+				break
+			}
+			t.Fatalf("error decoding message: %v", err)
+		}
+		decodedMsgs = append(decodedMsgs, msg)
+	}
+
+	if len(decodedMsgs) != len(messages) {
+		t.Fatalf("expected %d decoded messages, got %d", len(messages), len(decodedMsgs))
+	}
+
+	for i, expected := range messages {
+		if !bytes.Equal(decodedMsgs[i].Data, expected) {
+			t.Errorf("msg %d mismatch: expected %q, got %q", i, string(expected), string(decodedMsgs[i].Data))
+		}
+	}
+}
+
+func errorsIsEOF(err error) bool {
+	return err != nil && err.Error() == "EOF"
+}
+
+func BenchmarkSender_Send_10k_10KB(b *testing.B) {
+	mockClient := &mockS3Client{}
+	payload := make([]byte, 10000)
+	for i := range payload {
+		payload[i] = byte(i % 256)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for n := 0; n < b.N; n++ {
+		s, err := sender.NewSender(sender.Options{
+			Client:        mockClient,
+			Bucket:        "bench-bucket",
+			Prefix:        "bench-prefix",
+			MaxBatchBytes: 100 * 1024 * 1024, // 100MB
+		})
+		if err != nil {
+			b.Fatalf("create sender: %v", err)
+		}
+
+		// Drain results goroutine
+		go func() {
+			for res := range s.Results() {
+				_ = res
+			}
+		}()
+
+		r := bytes.NewReader(payload)
+		for range 10000 {
+			r.Reset(payload)
+			if _, err := s.Send(r); err != nil {
+				b.Fatalf("send: %v", err)
+			}
+		}
+
+		_ = s.Close(context.Background())
+	}
+
+	b.SetBytes(int64(10000 * 10000))
+}
