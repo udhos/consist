@@ -47,6 +47,7 @@ type Sender struct {
 	results     chan Result
 	seq         uint64
 	batchBuf    bytes.Buffer
+	readBuf     bytes.Buffer
 	encoder     *wagon.Encoder
 	batchStart  time.Time
 	lastSend    time.Time
@@ -128,10 +129,11 @@ func (s *Sender) timerLoop() {
 // and returns its assigned sequence ID.
 // Note: Sender is not concurrency-safe and must be used by a single goroutine.
 func (s *Sender) Send(r io.Reader) (uint64, error) {
-	data, err := io.ReadAll(r)
-	if err != nil {
+	s.readBuf.Reset()
+	if _, err := io.Copy(&s.readBuf, r); err != nil {
 		return 0, fmt.Errorf("read payload: %w", err)
 	}
+	data := s.readBuf.Bytes()
 
 	now := time.Now()
 	if s.totalBatchB == 0 && s.batchBuf.Len() == 0 {
