@@ -380,6 +380,210 @@ func TestSender_MaxClientSilence(t *testing.T) {
 	<-ackDone
 }
 
+func TestSender_MultipartPartUploadDoesNotAckBatch(t *testing.T) {
+	mockClient := &mockS3Client{}
+	s, err := sender.NewSender(sender.Options{
+		Client:           mockClient,
+		Bucket:           "my-bucket",
+		Prefix:           "my-prefix",
+		MaxBatchBytes:    1024 * 1024,
+		MaxBatchTime:     10 * time.Second,
+		MaxClientSilence: 10 * time.Second,
+		MinPartBytes:     1,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating sender: %v", err)
+	}
+
+	resultsCh := make(chan sender.Result, 10)
+	go func() {
+		for res := range s.Results() {
+			resultsCh <- res
+		}
+	}()
+
+	seq, err := s.Send(bytes.NewReader([]byte("hello world")))
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	if len(mockClient.keys) != 1 {
+		t.Fatalf("expected multipart upload to start once, got %d keys", len(mockClient.keys))
+	}
+	if len(mockClient.uploadedParts) != 1 {
+		t.Fatalf("expected UploadPart to be called once, got %d uploaded parts in buffer", len(mockClient.uploadedParts))
+	}
+	if len(mockClient.completedPartNumbers) != 0 {
+		t.Fatalf("expected no complete multipart upload before final batch flush, got %d completed uploads", len(mockClient.completedPartNumbers))
+	}
+
+	select {
+	case res := <-resultsCh:
+		t.Fatalf("unexpected batch ack from multipart upload; got LastSeq=%d Err=%v", res.LastSeq, res.Err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	if err := s.Close(context.Background()); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	select {
+	case res := <-resultsCh:
+		if res.LastSeq != seq {
+			t.Fatalf("expected final ack LastSeq %d, got %d", seq, res.LastSeq)
+		}
+		if res.Err != nil {
+			t.Fatalf("unexpected final batch error: %v", res.Err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for final batch ack after Close")
+	}
+}
+
+func TestSender_ResultsOnlyOnBatchFinalizationConditions(t *testing.T) {
+	t.Run("max size", func(t *testing.T) {
+		mockClient := &mockS3Client{}
+		s, err := sender.NewSender(sender.Options{
+			Client:        mockClient,
+			Bucket:        "my-bucket",
+			Prefix:        "my-prefix",
+			MaxBatchBytes: 8,
+			MaxBatchTime:  10 * time.Second,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error creating sender: %v", err)
+		}
+		resultsCh := make(chan sender.Result, 10)
+		go func() {
+			for res := range s.Results() {
+				resultsCh <- res
+			}
+		}()
+
+		seq, err := s.Send(bytes.NewReader(bytes.Repeat([]byte("x"), 64)))
+		if err != nil {
+			t.Fatalf("send: %v", err)
+		}
+
+		select {
+		case res := <-resultsCh:
+			if res.LastSeq != seq {
+				t.Fatalf("expected LastSeq %d, got %d", seq, res.LastSeq)
+			}
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("timed out waiting for max-size batch ack")
+		}
+	})
+
+	t.Run("max time", func(t *testing.T) {
+		mockClient := &mockS3Client{}
+		s, err := sender.NewSender(sender.Options{
+			Client:           mockClient,
+			Bucket:           "my-bucket",
+			Prefix:           "my-prefix",
+			MaxBatchBytes:    1024 * 1024,
+			MaxBatchTime:     50 * time.Millisecond,
+			MaxClientSilence: 10 * time.Second,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error creating sender: %v", err)
+		}
+		resultsCh := make(chan sender.Result, 10)
+		go func() {
+			for res := range s.Results() {
+				resultsCh <- res
+			}
+		}()
+
+		seq, err := s.Send(bytes.NewReader([]byte("payload")))
+		if err != nil {
+			t.Fatalf("send: %v", err)
+		}
+
+		select {
+		case res := <-resultsCh:
+			if res.LastSeq != seq {
+				t.Fatalf("expected LastSeq %d, got %d", seq, res.LastSeq)
+			}
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("timed out waiting for max-time batch ack")
+		}
+	})
+
+	t.Run("silence", func(t *testing.T) {
+		mockClient := &mockS3Client{}
+		s, err := sender.NewSender(sender.Options{
+			Client:           mockClient,
+			Bucket:           "my-bucket",
+			Prefix:           "my-prefix",
+			MaxBatchBytes:    1024 * 1024,
+			MaxBatchTime:     10 * time.Second,
+			MaxClientSilence: 50 * time.Millisecond,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error creating sender: %v", err)
+		}
+		resultsCh := make(chan sender.Result, 10)
+		go func() {
+			for res := range s.Results() {
+				resultsCh <- res
+			}
+		}()
+
+		seq, err := s.Send(bytes.NewReader([]byte("payload")))
+		if err != nil {
+			t.Fatalf("send: %v", err)
+		}
+
+		select {
+		case res := <-resultsCh:
+			if res.LastSeq != seq {
+				t.Fatalf("expected LastSeq %d, got %d", seq, res.LastSeq)
+			}
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("timed out waiting for silence-triggered batch ack")
+		}
+	})
+
+	t.Run("close", func(t *testing.T) {
+		mockClient := &mockS3Client{}
+		s, err := sender.NewSender(sender.Options{
+			Client:        mockClient,
+			Bucket:        "my-bucket",
+			Prefix:        "my-prefix",
+			MaxBatchBytes: 1024 * 1024,
+			MaxBatchTime:  10 * time.Second,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error creating sender: %v", err)
+		}
+		resultsCh := make(chan sender.Result, 10)
+		go func() {
+			for res := range s.Results() {
+				resultsCh <- res
+			}
+		}()
+
+		seq, err := s.Send(bytes.NewReader([]byte("payload")))
+		if err != nil {
+			t.Fatalf("send: %v", err)
+		}
+
+		if err := s.Close(context.Background()); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+
+		select {
+		case res := <-resultsCh:
+			if res.LastSeq != seq {
+				t.Fatalf("expected LastSeq %d after Close, got %d", seq, res.LastSeq)
+			}
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("timed out waiting for final Close ack")
+		}
+	})
+}
+
 func TestSender_CloseIsIdempotent(t *testing.T) {
 	mockClient := &mockS3Client{}
 	s, err := sender.NewSender(sender.Options{
