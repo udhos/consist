@@ -32,6 +32,13 @@ type blockingMultipartClient struct {
 	releasePart1 chan struct{}
 }
 
+type flushRaceMultipartClient struct {
+	sender.S3Client
+	partStarted  chan int32
+	releasePart1 chan struct{}
+	releasePart2 chan struct{}
+}
+
 func (m *blockingMultipartClient) CreateMultipartUpload(_ context.Context, _ *s3.CreateMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error) {
 	uploadID := "blocking-upload-id"
 	return &s3.CreateMultipartUploadOutput{UploadId: &uploadID}, nil
@@ -52,6 +59,32 @@ func (m *blockingMultipartClient) CompleteMultipartUpload(_ context.Context, _ *
 }
 
 func (m *blockingMultipartClient) AbortMultipartUpload(_ context.Context, _ *s3.AbortMultipartUploadInput, _ ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
+	return &s3.AbortMultipartUploadOutput{}, nil
+}
+
+func (m *flushRaceMultipartClient) CreateMultipartUpload(_ context.Context, _ *s3.CreateMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error) {
+	uploadID := "flush-race-upload-id"
+	return &s3.CreateMultipartUploadOutput{UploadId: &uploadID}, nil
+}
+
+func (m *flushRaceMultipartClient) UploadPart(_ context.Context, params *s3.UploadPartInput, _ ...func(*s3.Options)) (*s3.UploadPartOutput, error) {
+	partNumber := *params.PartNumber
+	m.partStarted <- partNumber
+	if partNumber == 1 {
+		<-m.releasePart1
+	}
+	if partNumber == 2 {
+		<-m.releasePart2
+	}
+	etag := "flush-race-etag"
+	return &s3.UploadPartOutput{ETag: &etag}, nil
+}
+
+func (m *flushRaceMultipartClient) CompleteMultipartUpload(_ context.Context, _ *s3.CompleteMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error) {
+	return &s3.CompleteMultipartUploadOutput{}, nil
+}
+
+func (m *flushRaceMultipartClient) AbortMultipartUpload(_ context.Context, _ *s3.AbortMultipartUploadInput, _ ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
 	return &s3.AbortMultipartUploadOutput{}, nil
 }
 
@@ -191,6 +224,69 @@ func TestSender_UploadsMultipartPartsConcurrently(t *testing.T) {
 	}
 	if err := s.Close(context.Background()); err != nil {
 		t.Fatalf("unexpected close error: %v", err)
+	}
+}
+
+func TestSender_DoesNotAppendPartDuringFinalization(t *testing.T) {
+	mockClient := &flushRaceMultipartClient{
+		partStarted:  make(chan int32, 3),
+		releasePart1: make(chan struct{}),
+		releasePart2: make(chan struct{}),
+	}
+	s, err := sender.NewSender(sender.Options{
+		Client:           mockClient,
+		Bucket:           "my-bucket",
+		MinPartBytes:     100,
+		MaxBatchBytes:    1024 * 1024,
+		MaxBatchTime:     time.Hour,
+		MaxClientSilence: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating sender: %v", err)
+	}
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, sendErr := s.Send(bytes.NewReader(bytes.Repeat([]byte("a"), 200)))
+		firstDone <- sendErr
+	}()
+	if partNumber := <-mockClient.partStarted; partNumber != 1 {
+		t.Fatalf("expected first part, got %d", partNumber)
+	}
+
+	if _, err := s.Send(bytes.NewReader([]byte("short"))); err != nil {
+		t.Fatalf("second send: %v", err)
+	}
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- s.Close(context.Background())
+	}()
+	if partNumber := <-mockClient.partStarted; partNumber != 2 {
+		t.Fatalf("expected short final part 2, got %d", partNumber)
+	}
+
+	thirdDone := make(chan error, 1)
+	go func() {
+		_, sendErr := s.Send(bytes.NewReader(bytes.Repeat([]byte("c"), 200)))
+		thirdDone <- sendErr
+	}()
+	select {
+	case partNumber := <-mockClient.partStarted:
+		t.Fatalf("created part %d while finalization was in progress", partNumber)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(mockClient.releasePart2)
+	close(mockClient.releasePart1)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first send: %v", err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := <-thirdDone; err == nil {
+		t.Fatal("expected concurrent send to be rejected after Close")
 	}
 }
 

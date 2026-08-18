@@ -66,6 +66,8 @@ type Sender struct {
 	uploadGate  sync.RWMutex
 	uploadErr   error
 	stateMu     sync.Mutex
+	flushing    bool
+	flushDone   chan struct{}
 	closeOnce   sync.Once
 	closeErr    error
 	closed      chan struct{}
@@ -175,6 +177,12 @@ func (s *Sender) timerLoop() {
 func (s *Sender) Send(r io.Reader) (uint64, error) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
+	for s.flushing {
+		done := s.flushDone
+		s.stateMu.Unlock()
+		<-done
+		s.stateMu.Lock()
+	}
 	select {
 	case <-s.closed:
 		return 0, fmt.Errorf("sender is closed")
@@ -350,6 +358,13 @@ func (s *Sender) flushWithContext(ctx context.Context) error {
 	if s.totalBatchB == 0 && s.batchBuf.Len() == 0 {
 		return nil
 	}
+	s.flushing = true
+	s.flushDone = make(chan struct{})
+	defer func() {
+		s.flushing = false
+		close(s.flushDone)
+		s.flushDone = nil
+	}()
 
 	var uploadErr error
 	if s.batchBuf.Len() > 0 {
