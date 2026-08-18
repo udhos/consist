@@ -1219,8 +1219,8 @@ func BenchmarkSender_SustainedAWS(b *testing.B) {
 		go test ./sender \
 		  -run='^$' \
 		  -bench='^BenchmarkSender_SustainedAWS_Producers$' \
-		  -benchtime=5s \
-		  -count=3 \
+		  -benchtime=120s \
+		  -count=1 \
 		  -benchmem
 
 goos: linux
@@ -1256,7 +1256,7 @@ func BenchmarkSender_SustainedAWS_Producers(b *testing.B) {
 	client := s3.NewFromConfig(awsConfig)
 	payload := make([]byte, 10*1024)
 
-	for _, producers := range []int{1, 2, 4, 8} {
+	for _, producers := range []int{8, 16} {
 		b.Run(fmt.Sprintf("producers_%d", producers), func(b *testing.B) {
 			s, err := sender.NewSender(sender.Options{
 				Client:        client,
