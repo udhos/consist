@@ -804,13 +804,13 @@ goos: linux
 goarch: amd64
 pkg: github.com/udhos/consist/sender
 cpu: 13th Gen Intel(R) Core(TM) i7-1360P
-BenchmarkSender_Send_10k_10KB-16        	       8	 144549132 ns/op	 691.81 MB/s	847425173 B/op	   10442 allocs/op
-BenchmarkSender_Send_10k_10KB-16        	       9	 144791823 ns/op	 690.65 MB/s	847424208 B/op	   10438 allocs/op
-BenchmarkSender_Send_10k_10KB-16        	       9	 139900119 ns/op	 714.80 MB/s	847424481 B/op	   10439 allocs/op
-BenchmarkSender_Send_10k_10KB-16        	       9	 141713328 ns/op	 705.65 MB/s	847424718 B/op	   10441 allocs/op
-BenchmarkSender_Send_10k_10KB-16        	      10	 152509382 ns/op	 655.70 MB/s	847424005 B/op	   10439 allocs/op
+BenchmarkSender_Send_10k_10KB-16    	       8	 148058207 ns/op	 675.41 MB/s	847424720 B/op	   10442 allocs/op
+BenchmarkSender_Send_10k_10KB-16    	       8	 141890268 ns/op	 704.77 MB/s	847424752 B/op	   10441 allocs/op
+BenchmarkSender_Send_10k_10KB-16    	       9	 151272966 ns/op	 661.06 MB/s	847424613 B/op	   10441 allocs/op
+BenchmarkSender_Send_10k_10KB-16    	       8	 147615572 ns/op	 677.44 MB/s	847424682 B/op	   10441 allocs/op
+BenchmarkSender_Send_10k_10KB-16    	      10	 156430167 ns/op	 639.26 MB/s	847424333 B/op	   10441 allocs/op
 PASS
-ok  	github.com/udhos/consist/sender	12.328s
+ok  	github.com/udhos/consist/sender	12.409s
 */
 func BenchmarkSender_Send_10k_10KB(b *testing.B) {
 	mockClient := &mockS3Client{}

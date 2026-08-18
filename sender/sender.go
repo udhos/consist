@@ -55,6 +55,7 @@ type Sender struct {
 	batchStart  time.Time
 	lastSend    time.Time
 	timerStop   chan struct{}
+	timerWake   chan struct{}
 	timerDone   chan struct{}
 	uploadID    string
 	key         string
@@ -94,6 +95,7 @@ func NewSender(opts Options) (*Sender, error) {
 		options:   opts,
 		results:   make(chan Result, 100),
 		timerStop: make(chan struct{}),
+		timerWake: make(chan struct{}, 1),
 		timerDone: make(chan struct{}),
 		closed:    make(chan struct{}),
 	}
@@ -111,14 +113,45 @@ func NewSender(opts Options) (*Sender, error) {
 
 func (s *Sender) timerLoop() {
 	defer close(s.timerDone)
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	defer timer.Stop()
 
 	for {
+		s.stateMu.Lock()
+		var timerC <-chan time.Time
+		if s.batchBuf.Len() > 0 {
+			deadline := s.lastSend.Add(s.options.MaxClientSilence)
+			batchDeadline := s.batchStart.Add(s.options.MaxBatchTime)
+			if !s.batchStart.IsZero() && batchDeadline.Before(deadline) {
+				deadline = batchDeadline
+			}
+			remaining := max(time.Until(deadline), 0)
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(remaining)
+			timerC = timer.C
+		} else {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		}
+		s.stateMu.Unlock()
+
 		select {
 		case <-s.timerStop:
 			return
-		case <-ticker.C:
+		case <-s.timerWake:
+		case <-timerC:
 			s.stateMu.Lock()
 			now := time.Now()
 			if s.batchBuf.Len() > 0 {
@@ -173,6 +206,10 @@ func (s *Sender) Send(r io.Reader) (uint64, error) {
 	// If total accumulated batch size reaches MaxBatchBytes, flush batch
 	if s.totalBatchB+s.batchBuf.Len() >= s.options.MaxBatchBytes {
 		s.flush()
+	}
+	select {
+	case s.timerWake <- struct{}{}:
+	default:
 	}
 
 	return s.seq, nil
