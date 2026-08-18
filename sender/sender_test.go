@@ -1241,6 +1241,31 @@ BenchmarkSender_SustainedAWS_Producers/producers_8-8              138381        
 BenchmarkSender_SustainedAWS_Producers/producers_8-8              141328             48006 ns/op         213.31 MB/s       10968 B/op          1 allocs/op
 PASS
 ok      github.com/udhos/consist/sender 100.163s
+
+# ------------
+
+	AWS_REGION=sa-east-1 CONSIST_BENCH_BUCKET=pulsix-br \
+		go test ./sender \
+		  -run='^$' \
+		  -bench='^BenchmarkSender_SustainedAWS_Producers$' \
+		  -benchtime=120s \
+		  -count=1 \
+		  -benchmem
+
+goos: linux
+goarch: amd64
+pkg: github.com/udhos/consist/sender
+cpu: Intel(R) Xeon(R) Platinum 8275CL CPU @ 3.00GHz
+BenchmarkSender_SustainedAWS_Producers/producers_8-8
+
+	3036224             46892 ns/op         218.37 MB/s       10337 B/op          1 allocs/op
+
+BenchmarkSender_SustainedAWS_Producers/producers_16-8
+
+	3030388             47047 ns/op         217.65 MB/s       10335 B/op          1 allocs/op
+
+PASS
+ok      github.com/udhos/consist/sender 383.536s
 */
 func BenchmarkSender_SustainedAWS_Producers(b *testing.B) {
 	bucket := os.Getenv("CONSIST_BENCH_BUCKET")
