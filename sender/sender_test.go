@@ -1055,10 +1055,29 @@ func BenchmarkSender_Send_10k_10KB_AWS(b *testing.B) {
 	AWS_REGION=sa-east-1 CONSIST_BENCH_BUCKET=bucketname \
 		go test ./sender \
 		  -run='^$' \
-		  -bench='^BenchmarkSender_Send_10k_10KB_AWS(|_PartSizes)$' \
+		  -bench='^BenchmarkSender_Send_10k_10KB_AWS_PartSizes$' \
 		  -benchtime=5s \
 		  -count=3 \
 		  -benchmem
+
+goos: linux
+goarch: amd64
+pkg: github.com/udhos/consist/sender
+cpu: Intel(R) Xeon(R) Platinum 8275CL CPU @ 3.00GHz
+BenchmarkSender_Send_10k_10KB_AWS_PartSizes/part_5MiB-8                    32200            184473 ns/op          54.21 MB/s       10855 B/op 2 allocs/op
+BenchmarkSender_Send_10k_10KB_AWS_PartSizes/part_5MiB-8                    33002            190577 ns/op          52.47 MB/s       10824 B/op 2 allocs/op
+BenchmarkSender_Send_10k_10KB_AWS_PartSizes/part_5MiB-8                    37064            184278 ns/op          54.27 MB/s       10763 B/op 2 allocs/op
+BenchmarkSender_Send_10k_10KB_AWS_PartSizes/part_10MiB-8                   42808            136639 ns/op          73.19 MB/s       11129 B/op 1 allocs/op
+BenchmarkSender_Send_10k_10KB_AWS_PartSizes/part_10MiB-8                   45877            129164 ns/op          77.42 MB/s       10883 B/op 1 allocs/op
+BenchmarkSender_Send_10k_10KB_AWS_PartSizes/part_10MiB-8                   44618            133209 ns/op          75.07 MB/s       11010 B/op 1 allocs/op
+BenchmarkSender_Send_10k_10KB_AWS_PartSizes/part_25MiB-8                   64500            115410 ns/op          86.65 MB/s       11118 B/op 1 allocs/op
+BenchmarkSender_Send_10k_10KB_AWS_PartSizes/part_25MiB-8                   63386            116427 ns/op          85.89 MB/s       11310 B/op 1 allocs/op
+BenchmarkSender_Send_10k_10KB_AWS_PartSizes/part_25MiB-8                   65076            112760 ns/op          88.68 MB/s       11015 B/op 1 allocs/op
+BenchmarkSender_Send_10k_10KB_AWS_PartSizes/part_50MiB-8                   87399            112604 ns/op          88.81 MB/s       11553 B/op 1 allocs/op
+BenchmarkSender_Send_10k_10KB_AWS_PartSizes/part_50MiB-8                   86336            114266 ns/op          87.52 MB/s       11696 B/op 1 allocs/op
+BenchmarkSender_Send_10k_10KB_AWS_PartSizes/part_50MiB-8                   82276            109479 ns/op          91.34 MB/s       11634 B/op 1 allocs/op
+PASS
+ok      github.com/udhos/consist/sender 114.869s
 */
 func BenchmarkSender_Send_10k_10KB_AWS_PartSizes(b *testing.B) {
 	bucket := os.Getenv("CONSIST_BENCH_BUCKET")
