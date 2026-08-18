@@ -1218,7 +1218,7 @@ func BenchmarkSender_SustainedAWS(b *testing.B) {
 	AWS_REGION=sa-east-1 CONSIST_BENCH_BUCKET=bucketname \
 		go test ./sender \
 		  -run='^$' \
-		  -bench='^BenchmarkSender_SustainedAWS_Producers$' \
+		  -bench='^BenchmarkSender_SustainedAWS_Producers_25MBPart$' \
 		  -benchtime=120s \
 		  -count=1 \
 		  -benchmem
@@ -1227,27 +1227,27 @@ goos: linux
 goarch: amd64
 pkg: github.com/udhos/consist/sender
 cpu: Intel(R) Xeon(R) Platinum 8275CL CPU @ 3.00GHz
-BenchmarkSender_SustainedAWS_Producers/producers_1-8               63614            119392 ns/op          85.77 MB/s       11532 B/op          1 allocs/op
-BenchmarkSender_SustainedAWS_Producers/producers_1-8               63090            121022 ns/op          84.61 MB/s       11629 B/op          1 allocs/op
-BenchmarkSender_SustainedAWS_Producers/producers_1-8               64915            118681 ns/op          86.28 MB/s       11706 B/op          1 allocs/op
-BenchmarkSender_SustainedAWS_Producers/producers_2-8               91594             71061 ns/op         144.10 MB/s       11174 B/op          1 allocs/op
-BenchmarkSender_SustainedAWS_Producers/producers_2-8               91218             73232 ns/op         139.83 MB/s       11219 B/op          1 allocs/op
-BenchmarkSender_SustainedAWS_Producers/producers_2-8               90337             70611 ns/op         145.02 MB/s       11330 B/op          1 allocs/op
-BenchmarkSender_SustainedAWS_Producers/producers_4-8               92848             61016 ns/op         167.82 MB/s       11307 B/op          1 allocs/op
-BenchmarkSender_SustainedAWS_Producers/producers_4-8               92224             55142 ns/op         185.70 MB/s       11381 B/op          1 allocs/op
-BenchmarkSender_SustainedAWS_Producers/producers_4-8               92606             58450 ns/op         175.19 MB/s       11335 B/op          1 allocs/op
-BenchmarkSender_SustainedAWS_Producers/producers_8-8              143473             48463 ns/op         211.29 MB/s       10987 B/op          1 allocs/op
-BenchmarkSender_SustainedAWS_Producers/producers_8-8              138381             50578 ns/op         202.46 MB/s       11014 B/op          1 allocs/op
-BenchmarkSender_SustainedAWS_Producers/producers_8-8              141328             48006 ns/op         213.31 MB/s       10968 B/op          1 allocs/op
+BenchmarkSender_SustainedAWS_Producers_25MBPart/producers_1-8               63614            119392 ns/op          85.77 MB/s       11532 B/op          1 allocs/op
+BenchmarkSender_SustainedAWS_Producers_25MBPart/producers_1-8               63090            121022 ns/op          84.61 MB/s       11629 B/op          1 allocs/op
+BenchmarkSender_SustainedAWS_Producers_25MBPart/producers_1-8               64915            118681 ns/op          86.28 MB/s       11706 B/op          1 allocs/op
+BenchmarkSender_SustainedAWS_Producers_25MBPart/producers_2-8               91594             71061 ns/op         144.10 MB/s       11174 B/op          1 allocs/op
+BenchmarkSender_SustainedAWS_Producers_25MBPart/producers_2-8               91218             73232 ns/op         139.83 MB/s       11219 B/op          1 allocs/op
+BenchmarkSender_SustainedAWS_Producers_25MBPart/producers_2-8               90337             70611 ns/op         145.02 MB/s       11330 B/op          1 allocs/op
+BenchmarkSender_SustainedAWS_Producers_25MBPart/producers_4-8               92848             61016 ns/op         167.82 MB/s       11307 B/op          1 allocs/op
+BenchmarkSender_SustainedAWS_Producers_25MBPart/producers_4-8               92224             55142 ns/op         185.70 MB/s       11381 B/op          1 allocs/op
+BenchmarkSender_SustainedAWS_Producers_25MBPart/producers_4-8               92606             58450 ns/op         175.19 MB/s       11335 B/op          1 allocs/op
+BenchmarkSender_SustainedAWS_Producers_25MBPart/producers_8-8              143473             48463 ns/op         211.29 MB/s       10987 B/op          1 allocs/op
+BenchmarkSender_SustainedAWS_Producers_25MBPart/producers_8-8              138381             50578 ns/op         202.46 MB/s       11014 B/op          1 allocs/op
+BenchmarkSender_SustainedAWS_Producers_25MBPart/producers_8-8              141328             48006 ns/op         213.31 MB/s       10968 B/op          1 allocs/op
 PASS
 ok      github.com/udhos/consist/sender 100.163s
 
 # ------------
 
-	AWS_REGION=sa-east-1 CONSIST_BENCH_BUCKET=pulsix-br \
+	AWS_REGION=sa-east-1 CONSIST_BENCH_BUCKET=bucketname \
 		go test ./sender \
 		  -run='^$' \
-		  -bench='^BenchmarkSender_SustainedAWS_Producers$' \
+		  -bench='^BenchmarkSender_SustainedAWS_Producers_25MBPart$' \
 		  -benchtime=120s \
 		  -count=1 \
 		  -benchmem
@@ -1256,18 +1256,18 @@ goos: linux
 goarch: amd64
 pkg: github.com/udhos/consist/sender
 cpu: Intel(R) Xeon(R) Platinum 8275CL CPU @ 3.00GHz
-BenchmarkSender_SustainedAWS_Producers/producers_8-8
+BenchmarkSender_SustainedAWS_Producers_25MBPart/producers_8-8
 
 	3036224             46892 ns/op         218.37 MB/s       10337 B/op          1 allocs/op
 
-BenchmarkSender_SustainedAWS_Producers/producers_16-8
+BenchmarkSender_SustainedAWS_Producers_25MBPart/producers_16-8
 
 	3030388             47047 ns/op         217.65 MB/s       10335 B/op          1 allocs/op
 
 PASS
 ok      github.com/udhos/consist/sender 383.536s
 */
-func BenchmarkSender_SustainedAWS_Producers(b *testing.B) {
+func BenchmarkSender_SustainedAWS_Producers_25MBPart(b *testing.B) {
 	bucket := os.Getenv("CONSIST_BENCH_BUCKET")
 	if bucket == "" {
 		b.Skip("set CONSIST_BENCH_BUCKET")
@@ -1282,6 +1282,95 @@ func BenchmarkSender_SustainedAWS_Producers(b *testing.B) {
 	payload := make([]byte, 10*1024)
 
 	for _, producers := range []int{8, 16} {
+		b.Run(fmt.Sprintf("producers_%d", producers), func(b *testing.B) {
+			s, err := sender.NewSender(sender.Options{
+				Client:        client,
+				Bucket:        bucket,
+				Prefix:        "consist-bench/producers",
+				MaxBatchBytes: 100 * 1024 * 1024,
+				MinPartBytes:  25 * 1024 * 1024,
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			resultErr := make(chan error, 1)
+			resultsDone := make(chan struct{})
+			go func() {
+				defer close(resultsDone)
+				for result := range s.Results() {
+					if result.Err != nil {
+						select {
+						case resultErr <- result.Err:
+						default:
+						}
+					}
+				}
+			}()
+
+			b.SetBytes(int64(len(payload)))
+			b.ResetTimer()
+			var wg sync.WaitGroup
+			producerErr := make(chan error, producers)
+			for producer := range producers {
+				wg.Add(1)
+				go func(producer int) {
+					defer wg.Done()
+					reader := bytes.NewReader(payload)
+					for i := producer; i < b.N; i += producers {
+						reader.Reset(payload)
+						if _, err := s.Send(reader); err != nil {
+							producerErr <- err
+							return
+						}
+					}
+				}(producer)
+			}
+			wg.Wait()
+			b.StopTimer()
+
+			select {
+			case err := <-producerErr:
+				b.Fatal(err)
+			default:
+			}
+			if err := s.Close(ctx); err != nil {
+				b.Fatal(err)
+			}
+			<-resultsDone
+			select {
+			case err := <-resultErr:
+				b.Fatal(err)
+			default:
+			}
+		})
+	}
+}
+
+/*
+	AWS_REGION=sa-east-1 CONSIST_BENCH_BUCKET=bucketname \
+		go test ./sender \
+		  -run='^$' \
+		  -bench='^BenchmarkSender_SustainedAWS_Producers_10MBPart$' \
+		  -benchtime=5s \
+		  -count=2 \
+		  -benchmem
+*/
+func BenchmarkSender_SustainedAWS_Producers_10MBPart(b *testing.B) {
+	bucket := os.Getenv("CONSIST_BENCH_BUCKET")
+	if bucket == "" {
+		b.Skip("set CONSIST_BENCH_BUCKET")
+	}
+
+	ctx := context.Background()
+	awsConfig, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		b.Fatal(err)
+	}
+	client := s3.NewFromConfig(awsConfig)
+	payload := make([]byte, 10*1024*1024)
+
+	for _, producers := range []int{8} {
 		b.Run(fmt.Sprintf("producers_%d", producers), func(b *testing.B) {
 			s, err := sender.NewSender(sender.Options{
 				Client:        client,
