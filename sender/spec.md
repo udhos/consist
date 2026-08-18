@@ -10,7 +10,7 @@ Key design goals:
 - **Streamable**: Accepts payload streams (`io.Reader`).
 - **Monotonic Sequence IDs**: Assigns incremental sequence numbers (`1, 2, 3...`) per message.
 - **Batch Acknowledgments**: Reports durable batch commits via a single `Result` channel.
-- **Single-Goroutine Design**: Not concurrency-safe by default, eliminating synchronization overhead for maximum single-threaded throughput.
+- **Concurrent Multipart Uploads**: Shared batch state is serialized while independent S3 part uploads may proceed concurrently.
 - **Mockable Storage Interface**: Interacts with S3 through a minimal `S3Client` interface.
 
 ## API Specification
@@ -79,7 +79,7 @@ func (s *Sender) Send(r io.Reader) (uint64, error)
 ```
 - Accepts an `io.Reader` payload.
 - Increments and returns the next monotonic sequence number (`uint64`).
-- Must be called from a single goroutine (not thread-safe).
+- May be called concurrently; sequence assignment and batch encoding remain serialized.
 
 #### `Results`
 ```go

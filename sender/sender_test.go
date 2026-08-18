@@ -26,6 +26,35 @@ type mockS3Client struct {
 	completedPartNumbers [][]int32
 }
 
+type blockingMultipartClient struct {
+	sender.S3Client
+	partStarted  chan int32
+	releasePart1 chan struct{}
+}
+
+func (m *blockingMultipartClient) CreateMultipartUpload(_ context.Context, _ *s3.CreateMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error) {
+	uploadID := "blocking-upload-id"
+	return &s3.CreateMultipartUploadOutput{UploadId: &uploadID}, nil
+}
+
+func (m *blockingMultipartClient) UploadPart(_ context.Context, params *s3.UploadPartInput, _ ...func(*s3.Options)) (*s3.UploadPartOutput, error) {
+	partNumber := *params.PartNumber
+	m.partStarted <- partNumber
+	if partNumber == 1 {
+		<-m.releasePart1
+	}
+	etag := "mock-etag"
+	return &s3.UploadPartOutput{ETag: &etag}, nil
+}
+
+func (m *blockingMultipartClient) CompleteMultipartUpload(_ context.Context, _ *s3.CompleteMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error) {
+	return &s3.CompleteMultipartUploadOutput{}, nil
+}
+
+func (m *blockingMultipartClient) AbortMultipartUpload(_ context.Context, _ *s3.AbortMultipartUploadInput, _ ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
+	return &s3.AbortMultipartUploadOutput{}, nil
+}
+
 func (m *mockS3Client) CreateMultipartUpload(_ context.Context, params *s3.CreateMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error) {
 	if m.injectError != nil {
 		return nil, m.injectError
@@ -105,6 +134,63 @@ func TestSender_CompletedPartsAreOrdered(t *testing.T) {
 		if partNumber != expected {
 			t.Fatalf("expected part %d at position %d, got %d", expected, i, partNumber)
 		}
+	}
+}
+
+func TestSender_UploadsMultipartPartsConcurrently(t *testing.T) {
+	mockClient := &blockingMultipartClient{
+		partStarted:  make(chan int32, 2),
+		releasePart1: make(chan struct{}),
+	}
+	s, err := sender.NewSender(sender.Options{
+		Client:        mockClient,
+		Bucket:        "my-bucket",
+		MinPartBytes:  1,
+		MaxBatchBytes: 1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating sender: %v", err)
+	}
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, sendErr := s.Send(bytes.NewReader([]byte("first")))
+		firstDone <- sendErr
+	}()
+
+	select {
+	case partNumber := <-mockClient.partStarted:
+		if partNumber != 1 {
+			t.Fatalf("expected first upload to be part 1, got %d", partNumber)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first part upload")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() {
+		_, sendErr := s.Send(bytes.NewReader([]byte("second")))
+		secondDone <- sendErr
+	}()
+
+	select {
+	case partNumber := <-mockClient.partStarted:
+		if partNumber != 2 {
+			t.Errorf("expected concurrent upload to be part 2, got %d", partNumber)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Error("part 2 did not start while part 1 was blocked; uploads are sequential")
+	}
+
+	close(mockClient.releasePart1)
+	if err := <-firstDone; err != nil {
+		t.Errorf("first send failed: %v", err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Errorf("second send failed: %v", err)
+	}
+	if err := s.Close(context.Background()); err != nil {
+		t.Fatalf("unexpected close error: %v", err)
 	}
 }
 
@@ -712,6 +798,20 @@ func errorsIsEOF(err error) bool {
 	return err != nil && err.Error() == "EOF"
 }
 
+/*
+$ go test -bench='^BenchmarkSender_Send_10k_10KB$' -benchmem -count=5 ./sender
+goos: linux
+goarch: amd64
+pkg: github.com/udhos/consist/sender
+cpu: 13th Gen Intel(R) Core(TM) i7-1360P
+BenchmarkSender_Send_10k_10KB-16        	       8	 144549132 ns/op	 691.81 MB/s	847425173 B/op	   10442 allocs/op
+BenchmarkSender_Send_10k_10KB-16        	       9	 144791823 ns/op	 690.65 MB/s	847424208 B/op	   10438 allocs/op
+BenchmarkSender_Send_10k_10KB-16        	       9	 139900119 ns/op	 714.80 MB/s	847424481 B/op	   10439 allocs/op
+BenchmarkSender_Send_10k_10KB-16        	       9	 141713328 ns/op	 705.65 MB/s	847424718 B/op	   10441 allocs/op
+BenchmarkSender_Send_10k_10KB-16        	      10	 152509382 ns/op	 655.70 MB/s	847424005 B/op	   10439 allocs/op
+PASS
+ok  	github.com/udhos/consist/sender	12.328s
+*/
 func BenchmarkSender_Send_10k_10KB(b *testing.B) {
 	mockClient := &mockS3Client{}
 	payload := make([]byte, 10000)

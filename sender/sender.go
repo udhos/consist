@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -60,6 +61,9 @@ type Sender struct {
 	completed   []types.CompletedPart
 	partNum     int32
 	totalBatchB int
+	uploadWG    sync.WaitGroup
+	uploadGate  sync.RWMutex
+	uploadErr   error
 	stateMu     sync.Mutex
 	closeOnce   sync.Once
 	closed      chan struct{}
@@ -132,7 +136,8 @@ func (s *Sender) timerLoop() {
 
 // Send reads payload from r, encodes it as a wagon record into the batch buffer,
 // and returns its assigned sequence ID.
-// Note: Sender is not concurrency-safe and must be used by a single goroutine.
+// Send is safe to call concurrently; encoding and batch state are serialized,
+// while independent multipart uploads may proceed concurrently.
 func (s *Sender) Send(r io.Reader) (uint64, error) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
@@ -229,7 +234,16 @@ func (s *Sender) uploadCurrentPart(ctx context.Context) error {
 	s.partNum++
 	partNum := s.partNum
 	partLen := s.batchBuf.Len()
-	payload := s.batchBuf.Bytes()
+	payload := append([]byte(nil), s.batchBuf.Bytes()...)
+	s.totalBatchB += partLen
+	s.batchBuf.Reset()
+	s.encoder.ResetWriter(&s.batchBuf)
+	s.uploadGate.RLock()
+	s.uploadWG.Add(1)
+
+	// Keep encoding and batch state protected, but allow independent S3 parts
+	// to upload concurrently.
+	s.stateMu.Unlock()
 
 	out, err := s.options.Client.UploadPart(ctx, &s3.UploadPartInput{
 		Bucket:     &s.options.Bucket,
@@ -238,7 +252,13 @@ func (s *Sender) uploadCurrentPart(ctx context.Context) error {
 		PartNumber: &partNum,
 		Body:       bytes.NewReader(payload),
 	})
+	s.stateMu.Lock()
+	s.uploadWG.Done()
+	s.uploadGate.RUnlock()
 	if err != nil {
+		if s.uploadErr == nil {
+			s.uploadErr = err
+		}
 		return err
 	}
 
@@ -247,11 +267,15 @@ func (s *Sender) uploadCurrentPart(ctx context.Context) error {
 		PartNumber: &partNum,
 	})
 
-	s.totalBatchB += partLen
-	s.batchBuf.Reset()
-	s.encoder.ResetWriter(&s.batchBuf)
-
 	return nil
+}
+
+func (s *Sender) waitForUploads() {
+	s.stateMu.Unlock()
+	s.uploadGate.Lock()
+	s.uploadWG.Wait()
+	s.uploadGate.Unlock()
+	s.stateMu.Lock()
 }
 
 func (s *Sender) flush() {
@@ -266,9 +290,16 @@ func (s *Sender) flush() {
 	if s.batchBuf.Len() > 0 {
 		uploadErr = s.uploadCurrentPart(ctx)
 	}
+	s.waitForUploads()
+	if uploadErr == nil {
+		uploadErr = s.uploadErr
+	}
 
 	// Complete multipart upload if active
 	if uploadErr == nil && s.uploadID != "" {
+		sort.Slice(s.completed, func(i, j int) bool {
+			return *s.completed[i].PartNumber < *s.completed[j].PartNumber
+		})
 		_, uploadErr = s.options.Client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
 			Bucket:   &s.options.Bucket,
 			Key:      &s.key,
@@ -299,6 +330,7 @@ func (s *Sender) flush() {
 	s.completed = nil
 	s.partNum = 0
 	s.totalBatchB = 0
+	s.uploadErr = nil
 	s.batchStart = time.Time{}
 	s.lastSend = time.Time{}
 }
@@ -333,7 +365,14 @@ func (s *Sender) flushWithContext(ctx context.Context) {
 	if s.batchBuf.Len() > 0 {
 		uploadErr = s.uploadCurrentPart(ctx)
 	}
+	s.waitForUploads()
+	if uploadErr == nil {
+		uploadErr = s.uploadErr
+	}
 	if uploadErr == nil && s.uploadID != "" {
+		sort.Slice(s.completed, func(i, j int) bool {
+			return *s.completed[i].PartNumber < *s.completed[j].PartNumber
+		})
 		_, uploadErr = s.options.Client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
 			Bucket:   &s.options.Bucket,
 			Key:      &s.key,
@@ -360,6 +399,7 @@ func (s *Sender) flushWithContext(ctx context.Context) {
 	s.completed = nil
 	s.partNum = 0
 	s.totalBatchB = 0
+	s.uploadErr = nil
 	s.batchStart = time.Time{}
 	s.lastSend = time.Time{}
 }
