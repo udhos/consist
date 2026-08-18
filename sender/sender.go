@@ -330,6 +330,9 @@ func (s *Sender) waitForUploads() {
 }
 
 func (s *Sender) flush() {
+	if s.flushing {
+		return
+	}
 	_ = s.flushWithContext(context.Background())
 }
 
