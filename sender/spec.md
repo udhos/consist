@@ -107,3 +107,34 @@ A batch is finalized and uploaded when any of the following conditions are met:
 4. **Explicit Close**: `Close(ctx)` is called to force a final flush of any remaining buffered records.
 
 The first three cases are automatic batch flush conditions. `Close(ctx)` is a controlled shutdown/finalization operation that emits the last result for the remaining buffer before the sender is closed.
+
+# Best benchmark so far
+
+- EC2 instance type: c5.2xlarge (8 vCPU, 16 GiB RAM, up to 10 Gbps network)
+- Producers: 8 or 16
+- Multipart part size: 25 MB
+
+```bash
+	AWS_REGION=sa-east-1 CONSIST_BENCH_BUCKET=bucketname \
+		go test ./sender \
+		  -run='^$' \
+		  -bench='^BenchmarkSender_SustainedAWS_Producers_25MBPart$' \
+		  -benchtime=120s \
+		  -count=1 \
+		  -benchmem
+
+goos: linux
+goarch: amd64
+pkg: github.com/udhos/consist/sender
+cpu: Intel(R) Xeon(R) Platinum 8275CL CPU @ 3.00GHz
+BenchmarkSender_SustainedAWS_Producers_25MBPart/producers_8-8
+
+	3036224             46892 ns/op         218.37 MB/s       10337 B/op          1 allocs/op
+
+BenchmarkSender_SustainedAWS_Producers_25MBPart/producers_16-8
+
+	3030388             47047 ns/op         217.65 MB/s       10335 B/op          1 allocs/op
+
+PASS
+ok      github.com/udhos/consist/sender 383.536s
+```

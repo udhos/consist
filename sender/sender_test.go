@@ -1352,7 +1352,7 @@ func BenchmarkSender_SustainedAWS_Producers_25MBPart(b *testing.B) {
 		go test ./sender \
 		  -run='^$' \
 		  -bench='^BenchmarkSender_SustainedAWS_Producers_10MBPart$' \
-		  -benchtime=5s \
+		  -benchtime=20s \
 		  -count=2 \
 		  -benchmem
 */
