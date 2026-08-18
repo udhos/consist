@@ -3,6 +3,7 @@ package sender_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"regexp"
@@ -1052,12 +1053,93 @@ func BenchmarkSender_Send_10k_10KB_AWS(b *testing.B) {
 
 /*
 	AWS_REGION=sa-east-1 CONSIST_BENCH_BUCKET=bucketname \
-			go test ./sender \
-			  -run='^$' \
-			  -bench='^BenchmarkSender_SustainedAWS$' \
-			  -benchtime=30s \
-			  -count=3 \
-			  -benchmem
+		go test ./sender \
+		  -run='^$' \
+		  -bench='^BenchmarkSender_Send_10k_10KB_AWS(|_PartSizes)$' \
+		  -benchtime=5s \
+		  -count=3 \
+		  -benchmem
+*/
+func BenchmarkSender_Send_10k_10KB_AWS_PartSizes(b *testing.B) {
+	bucket := os.Getenv("CONSIST_BENCH_BUCKET")
+	if bucket == "" {
+		b.Skip("set CONSIST_BENCH_BUCKET to run the real AWS benchmark")
+	}
+
+	ctx := context.Background()
+	awsConfig, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		b.Fatalf("load AWS config: %v", err)
+	}
+	client := s3.NewFromConfig(awsConfig)
+	payload := make([]byte, 10000)
+	partSizes := []int{
+		5 * 1024 * 1024,
+		10 * 1024 * 1024,
+		25 * 1024 * 1024,
+		50 * 1024 * 1024,
+	}
+
+	for _, partSize := range partSizes {
+		b.Run(fmt.Sprintf("part_%dMiB", partSize/(1024*1024)), func(b *testing.B) {
+			s, err := sender.NewSender(sender.Options{
+				Client:        client,
+				Bucket:        bucket,
+				Prefix:        "consist-bench/part-size",
+				MaxBatchBytes: 100 * 1024 * 1024,
+				MinPartBytes:  partSize,
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			resultsDone := make(chan struct{})
+			go func() {
+				defer close(resultsDone)
+				for result := range s.Results() {
+					if result.Err != nil {
+						b.Errorf("batch upload: %v", result.Err)
+					}
+				}
+			}()
+
+			r := bytes.NewReader(payload)
+			b.SetBytes(int64(len(payload)))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				r.Reset(payload)
+				if _, err := s.Send(r); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.StopTimer()
+
+			if err := s.Close(ctx); err != nil {
+				b.Fatal(err)
+			}
+			<-resultsDone
+		})
+	}
+}
+
+/*
+	AWS_REGION=sa-east-1 CONSIST_BENCH_BUCKET=bucketname \
+		go test ./sender \
+		-run='^$' \
+		-bench='^BenchmarkSender_SustainedAWS$' \
+		-benchtime=30s \
+		-count=3 \
+		-benchmem
+
+goos: linux
+goarch: amd64
+pkg: github.com/udhos/consist/sender
+cpu: Intel(R) Xeon(R) Platinum 8275CL CPU @ 3.00GHz
+BenchmarkSender_SustainedAWS-8            240770            139434 ns/op          73.44 MB/s       10471 B/op          1 allocs/op
+BenchmarkSender_SustainedAWS-8            259803            142263 ns/op          71.98 MB/s       10478 B/op          1 allocs/op
+BenchmarkSender_SustainedAWS-8            247593            140744 ns/op          72.76 MB/s       10498 B/op          1 allocs/op
+PASS
+ok      github.com/udhos/consist/sender 112.582s
 */
 func BenchmarkSender_SustainedAWS(b *testing.B) {
 	bucket := os.Getenv("CONSIST_BENCH_BUCKET")
