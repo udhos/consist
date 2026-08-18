@@ -728,6 +728,10 @@ func TestSender_CloseIsIdempotent(t *testing.T) {
 	if err := s.Close(context.Background()); err != nil {
 		t.Fatalf("second close should be a no-op: %v", err)
 	}
+
+	if _, err := s.Send(bytes.NewReader([]byte("after close"))); err == nil {
+		t.Fatal("expected Send after Close to fail")
+	}
 }
 
 func TestSender_ValidWagonFormat(t *testing.T) {

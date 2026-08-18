@@ -174,6 +174,11 @@ func (s *Sender) timerLoop() {
 func (s *Sender) Send(r io.Reader) (uint64, error) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
+	select {
+	case <-s.closed:
+		return 0, fmt.Errorf("sender is closed")
+	default:
+	}
 
 	s.readBuf.Reset()
 	if _, err := io.Copy(&s.readBuf, r); err != nil {
