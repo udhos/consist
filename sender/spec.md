@@ -43,7 +43,7 @@ type Options struct {
     MaxBatchBytes    int           // Max bytes per batch before flush (default: 100MB)
     MaxBatchTime     time.Duration // Max duration a batch can remain open before flush (default: 1s)
     MaxClientSilence time.Duration // Max inactivity duration after Send() before flush (default: 500ms)
-    MinPartBytes     int           // Minimum accumulated buffer size before uploading a multipart part (default: 10MB)
+    MinPartBytes     int           // Minimum accumulated buffer size before uploading a multipart part (default: 25MB)
 }
 ```
 
@@ -51,7 +51,7 @@ Default values applied when unspecified or zero:
 - `MaxBatchBytes`: `100 * 1024 * 1024` (100 MB)
 - `MaxBatchTime`: `1 * time.Second` (1 second)
 - `MaxClientSilence`: `500 * time.Millisecond` (500 milliseconds)
-- `MinPartBytes`: `10 * 1024 * 1024` (10 MB)
+- `MinPartBytes`: `25 * 1024 * 1024` (25 MB)
 
 #### `S3Client`
 Minimal S3 interface used by `Sender` for upload operations.
