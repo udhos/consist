@@ -887,6 +887,19 @@ func BenchmarkSender_Send_10k_10KB(b *testing.B) {
 	b.SetBytes(int64(10000 * 10000))
 }
 
+/*
+$ AWS_REGION=sa-east-1 CONSIST_BENCH_BUCKET=bucketname go test -v -run='^$' -bench='^BenchmarkSender_Send_10k_10KB_AWS$' -benchmem -count=3 ./sender
+goos: linux
+goarch: amd64
+pkg: github.com/udhos/consist/sender
+cpu: Intel(R) Xeon(R) Platinum 8275CL CPU @ 3.00GHz
+BenchmarkSender_Send_10k_10KB_AWS
+BenchmarkSender_Send_10k_10KB_AWS-8            1        1326268281 ns/op          75.40 MB/s    141035440 B/op     79700 allocs/op
+BenchmarkSender_Send_10k_10KB_AWS-8            1        1358256926 ns/op          73.62 MB/s    133649856 B/op     18004 allocs/op
+BenchmarkSender_Send_10k_10KB_AWS-8            1        1415666697 ns/op          70.64 MB/s    143862256 B/op     18576 allocs/op
+PASS
+ok      github.com/udhos/consist/sender 4.112s
+*/
 func BenchmarkSender_Send_10k_10KB_AWS(b *testing.B) {
 	bucket := os.Getenv("CONSIST_BENCH_BUCKET")
 	if bucket == "" {
@@ -939,4 +952,66 @@ func BenchmarkSender_Send_10k_10KB_AWS(b *testing.B) {
 	}
 
 	b.SetBytes(int64(10000 * 10000))
+}
+
+/*
+	AWS_REGION=sa-east-1 CONSIST_BENCH_BUCKET=bucketname \
+			go test ./sender \
+			  -run='^$' \
+			  -bench='^BenchmarkSender_SustainedAWS$' \
+			  -benchtime=30s \
+			  -count=3 \
+			  -benchmem
+*/
+func BenchmarkSender_SustainedAWS(b *testing.B) {
+	bucket := os.Getenv("CONSIST_BENCH_BUCKET")
+	if bucket == "" {
+		b.Skip("set CONSIST_BENCH_BUCKET")
+	}
+
+	ctx := context.Background()
+	awsConfig, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	s, err := sender.NewSender(sender.Options{
+		Client:        s3.NewFromConfig(awsConfig),
+		Bucket:        bucket,
+		Prefix:        "consist-bench",
+		MaxBatchBytes: 100 * 1024 * 1024,
+		MinPartBytes:  10 * 1024 * 1024,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	resultsDone := make(chan struct{})
+	go func() {
+		defer close(resultsDone)
+		for result := range s.Results() {
+			if result.Err != nil {
+				b.Errorf("batch upload: %v", result.Err)
+			}
+		}
+	}()
+
+	payload := make([]byte, 10*1024)
+	reader := bytes.NewReader(payload)
+
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		reader.Reset(payload)
+		if _, err := s.Send(reader); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.StopTimer()
+	if err := s.Close(ctx); err != nil {
+		b.Fatal(err)
+	}
+	<-resultsDone
 }
