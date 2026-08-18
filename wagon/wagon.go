@@ -56,8 +56,13 @@ func NewEncoder(w io.Writer, opts ...Options) (*Encoder, error) {
 
 // Reset reinitializes the encoder to write to the provided writer.
 func (e *Encoder) Reset(w io.Writer) {
-	e.w = w
+	e.ResetWriter(w)
 	e.headerWrote = false
+}
+
+// ResetWriter changes the output writer without starting a new Wagon stream.
+func (e *Encoder) ResetWriter(w io.Writer) {
+	e.w = w
 	e.tlvBuf.Reset()
 	e.kvBuf.Reset()
 	e.numBuf = [32]byte{}

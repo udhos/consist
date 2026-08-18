@@ -19,6 +19,7 @@ import (
 type mockS3Client struct {
 	sender.S3Client
 	uploadedParts        [][]byte
+	uploadedPartBytes    [][]byte
 	uploadedBytes        [][]byte
 	injectError          error
 	keys                 []string
@@ -45,6 +46,7 @@ func (m *mockS3Client) UploadPart(_ context.Context, params *s3.UploadPartInput,
 	if params.Body != nil {
 		buf, _ := io.ReadAll(params.Body)
 		m.uploadedParts = append(m.uploadedParts, buf)
+		m.uploadedPartBytes = append(m.uploadedPartBytes, buf)
 	}
 	return &s3.UploadPartOutput{ETag: &etag}, nil
 }
@@ -102,6 +104,40 @@ func TestSender_CompletedPartsAreOrdered(t *testing.T) {
 		expected := int32(i + 1)
 		if partNumber != expected {
 			t.Fatalf("expected part %d at position %d, got %d", expected, i, partNumber)
+		}
+	}
+}
+
+func TestSender_MultipartPrefixOnlyOnFirstPart(t *testing.T) {
+	mockClient := &mockS3Client{}
+	s, err := sender.NewSender(sender.Options{
+		Client:        mockClient,
+		Bucket:        "my-bucket",
+		MinPartBytes:  20,
+		MaxBatchBytes: 1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating sender: %v", err)
+	}
+
+	for range 3 {
+		if _, err := s.Send(bytes.NewReader(bytes.Repeat([]byte("x"), 100))); err != nil {
+			t.Fatalf("unexpected send error: %v", err)
+		}
+	}
+	if err := s.Close(context.Background()); err != nil {
+		t.Fatalf("unexpected close error: %v", err)
+	}
+
+	if len(mockClient.uploadedPartBytes) != 3 {
+		t.Fatalf("expected three uploaded parts, got %d", len(mockClient.uploadedPartBytes))
+	}
+	if !bytes.HasPrefix(mockClient.uploadedPartBytes[0], []byte("w1:")) {
+		t.Fatalf("expected first part to start with w1:, got %q", mockClient.uploadedPartBytes[0][:min(3, len(mockClient.uploadedPartBytes[0]))])
+	}
+	for i, part := range mockClient.uploadedPartBytes[1:] {
+		if bytes.HasPrefix(part, []byte("w1:")) {
+			t.Errorf("part %d unexpectedly starts with w1:", i+2)
 		}
 	}
 }

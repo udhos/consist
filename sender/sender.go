@@ -249,7 +249,7 @@ func (s *Sender) uploadCurrentPart(ctx context.Context) error {
 
 	s.totalBatchB += partLen
 	s.batchBuf.Reset()
-	s.encoder.Reset(&s.batchBuf)
+	s.encoder.ResetWriter(&s.batchBuf)
 
 	return nil
 }
