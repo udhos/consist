@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"regexp"
 	"sync"
@@ -1275,6 +1277,111 @@ func BenchmarkSender_SustainedAWS_Producers_25MBPart(b *testing.B) {
 
 	ctx := context.Background()
 	awsConfig, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		b.Fatal(err)
+	}
+	client := s3.NewFromConfig(awsConfig)
+	payload := make([]byte, 10*1024)
+
+	for _, producers := range []int{8, 16} {
+		b.Run(fmt.Sprintf("producers_%d", producers), func(b *testing.B) {
+			s, err := sender.NewSender(sender.Options{
+				Client:        client,
+				Bucket:        bucket,
+				Prefix:        "consist-bench/producers",
+				MaxBatchBytes: 100 * 1024 * 1024,
+				MinPartBytes:  25 * 1024 * 1024,
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			resultErr := make(chan error, 1)
+			resultsDone := make(chan struct{})
+			go func() {
+				defer close(resultsDone)
+				for result := range s.Results() {
+					if result.Err != nil {
+						select {
+						case resultErr <- result.Err:
+						default:
+						}
+					}
+				}
+			}()
+
+			b.SetBytes(int64(len(payload)))
+			b.ResetTimer()
+			var wg sync.WaitGroup
+			producerErr := make(chan error, producers)
+			for producer := range producers {
+				wg.Add(1)
+				go func(producer int) {
+					defer wg.Done()
+					reader := bytes.NewReader(payload)
+					for i := producer; i < b.N; i += producers {
+						reader.Reset(payload)
+						if _, err := s.Send(reader); err != nil {
+							producerErr <- err
+							return
+						}
+					}
+				}(producer)
+			}
+			wg.Wait()
+			b.StopTimer()
+
+			select {
+			case err := <-producerErr:
+				b.Fatal(err)
+			default:
+			}
+			if err := s.Close(ctx); err != nil {
+				b.Fatal(err)
+			}
+			<-resultsDone
+			select {
+			case err := <-resultErr:
+				b.Fatal(err)
+			default:
+			}
+		})
+	}
+}
+
+/*
+	AWS_REGION=sa-east-1 CONSIST_BENCH_BUCKET=bucketname \
+		go test ./sender \
+		  -run='^$' \
+		  -bench='^BenchmarkSender_SustainedAWS_Producers_25MBPart' \
+		  -benchtime=20s \
+		  -count=1 \
+		  -benchmem
+*/
+func BenchmarkSender_SustainedAWS_Producers_25MBPart_CustomTransport(b *testing.B) {
+	bucket := os.Getenv("CONSIST_BENCH_BUCKET")
+	if bucket == "" {
+		b.Skip("set CONSIST_BENCH_BUCKET")
+	}
+
+	ctx := context.Background()
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext
+	transport.ForceAttemptHTTP2 = true
+	transport.MaxIdleConns = 1_024
+	transport.MaxIdleConnsPerHost = 1_024
+	transport.IdleConnTimeout = 90 * time.Second
+	transport.TLSHandshakeTimeout = 10 * time.Second
+	transport.ExpectContinueTimeout = time.Second
+	transport.ReadBufferSize = 1 * 1024 * 1024
+	transport.WriteBufferSize = 1 * 1024 * 1024
+
+	awsConfig, err := config.LoadDefaultConfig(ctx, config.WithHTTPClient(&http.Client{
+		Transport: transport,
+	}))
 	if err != nil {
 		b.Fatal(err)
 	}
