@@ -67,6 +67,7 @@ type Sender struct {
 	uploadErr   error
 	stateMu     sync.Mutex
 	closeOnce   sync.Once
+	closeErr    error
 	closed      chan struct{}
 }
 
@@ -321,60 +322,7 @@ func (s *Sender) waitForUploads() {
 }
 
 func (s *Sender) flush() {
-	if s.totalBatchB == 0 && s.batchBuf.Len() == 0 {
-		return
-	}
-
-	ctx := context.Background()
-	var uploadErr error
-
-	// Upload remaining buffer as final part if needed
-	if s.batchBuf.Len() > 0 {
-		uploadErr = s.uploadCurrentPart(ctx)
-	}
-	s.waitForUploads()
-	if uploadErr == nil {
-		uploadErr = s.uploadErr
-	}
-
-	// Complete multipart upload if active
-	if uploadErr == nil && s.uploadID != "" {
-		sort.Slice(s.completed, func(i, j int) bool {
-			return *s.completed[i].PartNumber < *s.completed[j].PartNumber
-		})
-		_, uploadErr = s.options.Client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
-			Bucket:   &s.options.Bucket,
-			Key:      &s.key,
-			UploadId: &s.uploadID,
-			MultipartUpload: &types.CompletedMultipartUpload{
-				Parts: s.completed,
-			},
-		})
-	}
-
-	if uploadErr != nil && s.uploadID != "" {
-		_, _ = s.options.Client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
-			Bucket:   &s.options.Bucket,
-			Key:      &s.key,
-			UploadId: &s.uploadID,
-		})
-	}
-
-	s.results <- Result{
-		LastSeq: s.seq,
-		Err:     uploadErr,
-	}
-
-	s.batchBuf.Reset()
-	s.encoder.Reset(&s.batchBuf)
-	s.uploadID = ""
-	s.key = ""
-	s.completed = nil
-	s.partNum = 0
-	s.totalBatchB = 0
-	s.uploadErr = nil
-	s.batchStart = time.Time{}
-	s.lastSend = time.Time{}
+	_ = s.flushWithContext(context.Background())
 }
 
 // Results returns a read-only channel delivering batch processing outcomes.
@@ -390,17 +338,17 @@ func (s *Sender) Close(ctx context.Context) error {
 		s.stateMu.Lock()
 		defer s.stateMu.Unlock()
 		if s.totalBatchB > 0 || s.batchBuf.Len() > 0 {
-			s.flushWithContext(ctx)
+			s.closeErr = s.flushWithContext(ctx)
 		}
 		close(s.results)
 		close(s.closed)
 	})
-	return nil
+	return s.closeErr
 }
 
-func (s *Sender) flushWithContext(ctx context.Context) {
+func (s *Sender) flushWithContext(ctx context.Context) error {
 	if s.totalBatchB == 0 && s.batchBuf.Len() == 0 {
-		return
+		return nil
 	}
 
 	var uploadErr error
@@ -444,4 +392,5 @@ func (s *Sender) flushWithContext(ctx context.Context) {
 	s.uploadErr = nil
 	s.batchStart = time.Time{}
 	s.lastSend = time.Time{}
+	return uploadErr
 }

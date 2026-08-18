@@ -734,6 +734,35 @@ func TestSender_CloseIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestSender_CloseReturnsFinalFlushError(t *testing.T) {
+	closeErr := io.ErrClosedPipe
+	mockClient := &mockS3Client{injectError: closeErr}
+	s, err := sender.NewSender(sender.Options{
+		Client: mockClient,
+		Bucket: "my-bucket",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating sender: %v", err)
+	}
+
+	seq, err := s.Send(bytes.NewReader([]byte("payload")))
+	if err != nil {
+		t.Fatalf("unexpected send error: %v", err)
+	}
+
+	if err := s.Close(context.Background()); err != closeErr {
+		t.Fatalf("expected Close error %v, got %v", closeErr, err)
+	}
+
+	result := <-s.Results()
+	if result.LastSeq != seq {
+		t.Fatalf("expected result sequence %d, got %d", seq, result.LastSeq)
+	}
+	if result.Err != closeErr {
+		t.Fatalf("expected result error %v, got %v", closeErr, result.Err)
+	}
+}
+
 func TestSender_ValidWagonFormat(t *testing.T) {
 	mockClient := &mockS3Client{}
 
