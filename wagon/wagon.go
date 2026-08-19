@@ -111,13 +111,14 @@ func (e *Encoder) Encode(msg Message) error {
 		e.tlvBuf.Write(e.kvBuf.Bytes())
 	}
 
-	// Data ('d' TLV)
+	// Data ('d' TLV) - length prefix only; the payload itself is written
+	// directly to e.w below instead of being buffered in tlvBuf, to avoid
+	// an extra copy of potentially large payloads.
 	e.tlvBuf.WriteString("d:")
 	e.appendInt(len(msg.Data))
 	e.tlvBuf.WriteByte(':')
-	e.tlvBuf.Write(msg.Data)
 
-	recordLen := e.tlvBuf.Len()
+	recordLen := e.tlvBuf.Len() + len(msg.Data)
 
 	// Write record header "<recordLen>:" without allocation
 	numSlice := strconv.AppendInt(e.numBuf[:0], int64(recordLen), 10)
@@ -127,8 +128,95 @@ func (e *Encoder) Encode(msg Message) error {
 	if _, err := e.w.Write([]byte{':'}); err != nil {
 		return err
 	}
-	_, err := e.w.Write(e.tlvBuf.Bytes())
+	if _, err := e.w.Write(e.tlvBuf.Bytes()); err != nil {
+		return err
+	}
+	_, err := e.w.Write(msg.Data)
 	return err
+}
+
+// EncodeReader writes a single Message record like Encode, but streams the
+// data payload directly from r instead of requiring it as a []byte,
+// avoiding an extra buffer copy for large payloads. dataLen must equal the
+// exact number of bytes r will yield.
+func (e *Encoder) EncodeReader(msg Message, r io.Reader, dataLen int) error {
+	if !e.headerWrote {
+		if _, err := e.w.Write([]byte(magicHeader)); err != nil {
+			return err
+		}
+		e.headerWrote = true
+	}
+
+	e.tlvBuf.Reset()
+
+	msgID := msg.Metadata.MessageID
+	if msgID == "" && e.options.AddMessageID {
+		msgID = "auto"
+	}
+
+	// Metadata ('m' TLV) - Encoded as 'k' format: "id:<msgID>"
+	if msgID != "" {
+		e.kvBuf.Reset()
+		e.appendKV(&e.kvBuf, "id", msgID)
+
+		payloadLen := 2 + e.kvBuf.Len() // "k:" + KV data
+		e.tlvBuf.WriteString("m:")
+		e.appendInt(payloadLen)
+		e.tlvBuf.WriteString(":k:")
+		e.tlvBuf.Write(e.kvBuf.Bytes())
+	}
+
+	// Attributes ('a' TLV) - Encoded as 'k' format
+	if len(msg.Attributes) > 0 {
+		e.kvBuf.Reset()
+		for k, v := range msg.Attributes {
+			e.appendKV(&e.kvBuf, k, v)
+		}
+
+		payloadLen := 2 + e.kvBuf.Len() // "k:" + KV data
+		e.tlvBuf.WriteString("a:")
+		e.appendInt(payloadLen)
+		e.tlvBuf.WriteString(":k:")
+		e.tlvBuf.Write(e.kvBuf.Bytes())
+	}
+
+	// Data ('d' TLV) - length prefix only; payload streamed directly below.
+	e.tlvBuf.WriteString("d:")
+	e.appendInt(dataLen)
+	e.tlvBuf.WriteByte(':')
+
+	recordLen := e.tlvBuf.Len() + dataLen
+
+	numSlice := strconv.AppendInt(e.numBuf[:0], int64(recordLen), 10)
+	if _, err := e.w.Write(numSlice); err != nil {
+		return err
+	}
+	if _, err := e.w.Write([]byte{':'}); err != nil {
+		return err
+	}
+	if _, err := e.w.Write(e.tlvBuf.Bytes()); err != nil {
+		return err
+	}
+
+	n, err := e.copyData(e.w, r, int64(dataLen))
+	if err != nil {
+		return fmt.Errorf("stream data payload: %w", err)
+	}
+	if n != int64(dataLen) {
+		return fmt.Errorf("short data payload: expected %d bytes, wrote %d", dataLen, n)
+	}
+	return nil
+}
+
+// copyData writes n bytes from r to w. If r implements io.WriterTo (as
+// *bytes.Reader, *bytes.Buffer and *strings.Reader do), it is used directly
+// for a zero-copy, allocation-free transfer; otherwise it falls back to
+// io.CopyN.
+func (e *Encoder) copyData(w io.Writer, r io.Reader, n int64) (int64, error) {
+	if wt, ok := r.(io.WriterTo); ok {
+		return wt.WriteTo(w)
+	}
+	return io.CopyN(w, r, n)
 }
 
 func (e *Encoder) appendInt(v int) {

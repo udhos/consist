@@ -73,6 +73,22 @@ type Sender struct {
 	closed      chan struct{}
 }
 
+// readerLen reports the number of unread bytes remaining in r, for reader
+// types that can report it without consuming data. Used to avoid buffering
+// a copy of the payload when the length is already known upfront.
+func readerLen(r io.Reader) (int, bool) {
+	switch v := r.(type) {
+	case *bytes.Reader:
+		return v.Len(), true
+	case *bytes.Buffer:
+		return v.Len(), true
+	case *strings.Reader:
+		return v.Len(), true
+	default:
+		return 0, false
+	}
+}
+
 // NewSender creates a new Sender instance with the given configuration options.
 func NewSender(opts Options) (*Sender, error) {
 	if opts.Client == nil {
@@ -189,25 +205,42 @@ func (s *Sender) Send(r io.Reader) (uint64, error) {
 	default:
 	}
 
-	s.readBuf.Reset()
-	if _, err := io.Copy(&s.readBuf, r); err != nil {
-		return 0, fmt.Errorf("read payload: %w", err)
-	}
-	data := s.readBuf.Bytes()
+	// Fast path: readers with a cheaply-known remaining length (e.g.
+	// *bytes.Reader, *bytes.Buffer, *strings.Reader) are streamed directly
+	// into the batch buffer, skipping the readBuf copy used by the
+	// general io.Reader path below.
+	if dataLen, ok := readerLen(r); ok {
+		now := time.Now()
+		if s.totalBatchB == 0 && s.batchBuf.Len() == 0 {
+			s.batchStart = now
+		}
+		s.lastSend = now
 
-	now := time.Now()
-	if s.totalBatchB == 0 && s.batchBuf.Len() == 0 {
-		s.batchStart = now
-	}
-	s.lastSend = now
+		s.seq++
 
-	s.seq++
-	msg := wagon.Message{
-		Data: data,
-	}
+		if err := s.encoder.EncodeReader(wagon.Message{}, r, dataLen); err != nil {
+			return 0, fmt.Errorf("encode wagon record: %w", err)
+		}
+	} else {
+		s.readBuf.Reset()
+		if _, err := io.Copy(&s.readBuf, r); err != nil {
+			return 0, fmt.Errorf("read payload: %w", err)
+		}
 
-	if err := s.encoder.Encode(msg); err != nil {
-		return 0, fmt.Errorf("encode wagon record: %w", err)
+		now := time.Now()
+		if s.totalBatchB == 0 && s.batchBuf.Len() == 0 {
+			s.batchStart = now
+		}
+		s.lastSend = now
+
+		s.seq++
+		msg := wagon.Message{
+			Data: s.readBuf.Bytes(),
+		}
+
+		if err := s.encoder.Encode(msg); err != nil {
+			return 0, fmt.Errorf("encode wagon record: %w", err)
+		}
 	}
 
 	// If current buffer reaches MinPartBytes, upload an S3 part

@@ -115,13 +115,13 @@ The first three cases are automatic batch flush conditions. `Close(ctx)` is a co
 - Multipart part size: 25 MB
 
 ```bash
-	AWS_REGION=sa-east-1 CONSIST_BENCH_BUCKET=bucketname \
-		go test ./sender \
-		  -run='^$' \
-		  -bench='^BenchmarkSender_SustainedAWS_Producers_25MBPart$' \
-		  -benchtime=120s \
-		  -count=1 \
-		  -benchmem
+AWS_REGION=sa-east-1 CONSIST_BENCH_BUCKET=bucketname \
+    go test ./sender \
+        -run='^$' \
+        -bench='^BenchmarkSender_SustainedAWS_Producers_25MBPart$' \
+        -benchtime=20s \
+        -count=1 \
+        -benchmem
 
 goos: linux
 goarch: amd64
