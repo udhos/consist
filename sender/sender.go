@@ -49,7 +49,8 @@ type Sender struct {
 	options     Options
 	results     chan Result
 	seq         uint64
-	batchBuf    bytes.Buffer
+	batchBuf    *bytes.Buffer
+	bufPool     sync.Pool
 	readBuf     bytes.Buffer
 	encoder     *wagon.Encoder
 	batchStart  time.Time
@@ -71,6 +72,24 @@ type Sender struct {
 	closeOnce   sync.Once
 	closeErr    error
 	closed      chan struct{}
+}
+
+// newBuffer returns a pooled batch buffer, avoiding a fresh allocation for
+// every part. Freshly created buffers are pre-sized to MinPartBytes so they
+// grow once instead of repeatedly doubling as messages are encoded into them.
+func (s *Sender) newBuffer() *bytes.Buffer {
+	if v := s.bufPool.Get(); v != nil {
+		return v.(*bytes.Buffer)
+	}
+	buf := &bytes.Buffer{}
+	buf.Grow(s.options.MinPartBytes)
+	return buf
+}
+
+// releaseBuffer returns a drained batch buffer to the pool for reuse.
+func (s *Sender) releaseBuffer(buf *bytes.Buffer) {
+	buf.Reset()
+	s.bufPool.Put(buf)
 }
 
 // readerLen reports the number of unread bytes remaining in r, for reader
@@ -119,7 +138,8 @@ func NewSender(opts Options) (*Sender, error) {
 		closed:    make(chan struct{}),
 	}
 
-	enc, err := wagon.NewEncoder(&s.batchBuf)
+	s.batchBuf = s.newBuffer()
+	enc, err := wagon.NewEncoder(s.batchBuf)
 	if err != nil {
 		return nil, fmt.Errorf("create wagon encoder: %w", err)
 	}
@@ -308,7 +328,9 @@ func randomBatchSuffix() string {
 }
 
 // uploadCurrentPart hands the accumulated batch buffer off for upload and
-// returns immediately without waiting for the S3 round trip. The actual
+// returns immediately without waiting for the S3 round trip. The filled
+// buffer is swapped out for a pooled one instead of being copied, so this
+// no longer does an O(part size) memcpy while stateMu is held. The actual
 // network call runs in a separate goroutine (see uploadPartAsync) so the
 // producer that filled the part never blocks on network I/O; upload
 // concurrency is therefore not limited by the number of producer goroutines.
@@ -323,22 +345,22 @@ func (s *Sender) uploadCurrentPart(ctx context.Context) error {
 
 	s.partNum++
 	partNum := s.partNum
-	partLen := s.batchBuf.Len()
-	payload := append([]byte(nil), s.batchBuf.Bytes()...)
-	s.totalBatchB += partLen
-	s.batchBuf.Reset()
-	s.encoder.ResetWriter(&s.batchBuf)
+	filled := s.batchBuf
+	s.totalBatchB += filled.Len()
+	s.batchBuf = s.newBuffer()
+	s.encoder.ResetWriter(s.batchBuf)
 	s.uploadGate.RLock()
 	s.uploadWG.Add(1)
 
-	go s.uploadPartAsync(ctx, partNum, payload)
+	go s.uploadPartAsync(ctx, partNum, filled)
 
 	return nil
 }
 
 // uploadPartAsync performs the S3 UploadPart call and records its outcome.
 // Runs without stateMu held except while updating shared completion state.
-func (s *Sender) uploadPartAsync(ctx context.Context, partNum int32, payload []byte) {
+// buf is returned to the pool once the SDK is done reading it.
+func (s *Sender) uploadPartAsync(ctx context.Context, partNum int32, buf *bytes.Buffer) {
 	defer s.uploadGate.RUnlock()
 	defer s.uploadWG.Done()
 
@@ -347,8 +369,10 @@ func (s *Sender) uploadPartAsync(ctx context.Context, partNum int32, payload []b
 		Key:        &s.key,
 		UploadId:   &s.uploadID,
 		PartNumber: &partNum,
-		Body:       bytes.NewReader(payload),
+		Body:       bytes.NewReader(buf.Bytes()),
 	})
+
+	s.releaseBuffer(buf)
 
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
@@ -445,7 +469,7 @@ func (s *Sender) flushWithContext(ctx context.Context) error {
 	s.results <- Result{LastSeq: s.seq, Err: uploadErr}
 
 	s.batchBuf.Reset()
-	s.encoder.Reset(&s.batchBuf)
+	s.encoder.Reset(s.batchBuf)
 	s.uploadID = ""
 	s.key = ""
 	s.completed = nil
