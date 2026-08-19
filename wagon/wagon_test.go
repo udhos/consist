@@ -50,15 +50,191 @@ func TestEncoderOptionsAddMessageID(t *testing.T) {
 		t.Errorf("default encoder got %q, want %q", got, expectedDefault)
 	}
 
-	// Test with AddMessageID = true -> generates 'm' metadata TLV
+	// Test with AddMessageID = true -> generates 'm' metadata TLV with a non-empty ID
 	var buf2 bytes.Buffer
 	enc2, _ := NewEncoder(&buf2, Options{AddMessageID: true})
 	_ = enc2.Encode(msg)
-	expectedIDOption := "w1:26:m:12:k:2:id4:autod:5:hello"
-	if got := buf2.String(); got != expectedIDOption {
-		t.Errorf("AddMessageID encoder got %q, want %q", got, expectedIDOption)
+	wire := buf2.String()
+	if !bytes.HasPrefix(buf2.Bytes(), []byte("w1:")) {
+		t.Errorf("AddMessageID encoder output missing magic header, got %q", wire)
+	}
+	if !bytes.Contains(buf2.Bytes(), []byte("m:")) {
+		t.Errorf("AddMessageID encoder output missing 'm' TLV, got %q", wire)
+	}
+}
+
+// TestAddMessageIDFalse verifies that when AddMessageID is false (the default),
+// no 'm' TLV is written to the stream and the decoded MessageID is empty.
+func TestAddMessageIDFalse(t *testing.T) {
+	msg := Message{Data: []byte("payload")}
+
+	// Encode with default options (AddMessageID = false)
+	var buf bytes.Buffer
+	enc, err := NewEncoder(&buf)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	if err := enc.Encode(msg); err != nil {
+		t.Fatalf("Encode: %v", err)
 	}
 
+	wire := buf.Bytes()
+
+	// The raw wire bytes must not contain an 'm:' TLV marker.
+	if bytes.Contains(wire, []byte("m:")) {
+		t.Errorf("AddMessageID=false: unexpected 'm:' TLV in wire bytes: %q", wire)
+	}
+
+	// Decode and confirm MessageID is empty.
+	dec, err := NewDecoder(bytes.NewReader(wire))
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+	var got Message
+	if err := dec.Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Metadata.MessageID != "" {
+		t.Errorf("AddMessageID=false: expected empty MessageID, got %q", got.Metadata.MessageID)
+	}
+}
+
+// TestAddMessageIDTrue verifies that when AddMessageID is true, the encoder
+// automatically generates a non-empty, random MessageID that:
+//   - is present in the 'm' TLV of the encoded bytes;
+//   - round-trips correctly through the decoder;
+//   - is unique across independent Encode calls.
+func TestAddMessageIDTrue(t *testing.T) {
+	msg := Message{Data: []byte("payload")}
+
+	enc, err := NewEncoder(nil, Options{AddMessageID: true})
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+
+	var ids []string
+	const rounds = 5
+	for i := range rounds {
+		var buf bytes.Buffer
+		enc.Reset(&buf)
+		if err := enc.Encode(msg); err != nil {
+			t.Fatalf("round %d: Encode: %v", i, err)
+		}
+
+		wire := buf.Bytes()
+
+		// Wire bytes must contain an 'm:' TLV marker.
+		if !bytes.Contains(wire, []byte("m:")) {
+			t.Errorf("round %d: AddMessageID=true: missing 'm:' TLV in wire bytes: %q", i, wire)
+		}
+
+		// Decode and confirm the MessageID is non-empty.
+		dec, err := NewDecoder(bytes.NewReader(wire))
+		if err != nil {
+			t.Fatalf("round %d: NewDecoder: %v", i, err)
+		}
+		var got Message
+		if err := dec.Decode(&got); err != nil {
+			t.Fatalf("round %d: Decode: %v", i, err)
+		}
+		if got.Metadata.MessageID == "" {
+			t.Errorf("round %d: AddMessageID=true: decoded MessageID is empty", i)
+		}
+		ids = append(ids, got.Metadata.MessageID)
+	}
+
+	// All generated IDs must be unique.
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if _, dup := seen[id]; dup {
+			t.Errorf("AddMessageID=true: duplicate MessageID generated: %q", id)
+		}
+		seen[id] = struct{}{}
+	}
+}
+
+// TestAddMessageIDTrueEncodeReader is the EncodeReader counterpart of
+// TestAddMessageIDTrue, exercising the streaming path.
+func TestAddMessageIDTrueEncodeReader(t *testing.T) {
+	data := []byte("payload")
+	msg := Message{} // no explicit MessageID
+
+	enc, err := NewEncoder(nil, Options{AddMessageID: true})
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+
+	var ids []string
+	const rounds = 5
+	for i := range rounds {
+		var buf bytes.Buffer
+		enc.Reset(&buf)
+		if err := enc.EncodeReader(msg, bytes.NewReader(data), len(data)); err != nil {
+			t.Fatalf("round %d: EncodeReader: %v", i, err)
+		}
+
+		wire := buf.Bytes()
+
+		if !bytes.Contains(wire, []byte("m:")) {
+			t.Errorf("round %d: AddMessageID=true (EncodeReader): missing 'm:' TLV: %q", i, wire)
+		}
+
+		dec, err := NewDecoder(bytes.NewReader(wire))
+		if err != nil {
+			t.Fatalf("round %d: NewDecoder: %v", i, err)
+		}
+		var got Message
+		if err := dec.Decode(&got); err != nil {
+			t.Fatalf("round %d: Decode: %v", i, err)
+		}
+		if got.Metadata.MessageID == "" {
+			t.Errorf("round %d: AddMessageID=true (EncodeReader): decoded MessageID is empty", i)
+		}
+		ids = append(ids, got.Metadata.MessageID)
+	}
+
+	// Uniqueness check.
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if _, dup := seen[id]; dup {
+			t.Errorf("AddMessageID=true (EncodeReader): duplicate MessageID: %q", id)
+		}
+		seen[id] = struct{}{}
+	}
+}
+
+// TestAddMessageIDFalseEncodeReader is the EncodeReader counterpart of
+// TestAddMessageIDFalse, verifying no 'm' TLV when option is disabled.
+func TestAddMessageIDFalseEncodeReader(t *testing.T) {
+	data := []byte("payload")
+	msg := Message{}
+
+	var buf bytes.Buffer
+	enc, err := NewEncoder(&buf)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	if err := enc.EncodeReader(msg, bytes.NewReader(data), len(data)); err != nil {
+		t.Fatalf("EncodeReader: %v", err)
+	}
+
+	wire := buf.Bytes()
+
+	if bytes.Contains(wire, []byte("m:")) {
+		t.Errorf("AddMessageID=false (EncodeReader): unexpected 'm:' TLV in wire bytes: %q", wire)
+	}
+
+	dec, err := NewDecoder(bytes.NewReader(wire))
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+	var got Message
+	if err := dec.Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Metadata.MessageID != "" {
+		t.Errorf("AddMessageID=false (EncodeReader): expected empty MessageID, got %q", got.Metadata.MessageID)
+	}
 }
 
 func TestDecode(t *testing.T) {

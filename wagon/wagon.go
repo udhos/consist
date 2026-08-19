@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+
+	"github.com/segmentio/ksuid"
 )
 
 const magicHeader = "w1:"
@@ -81,8 +83,7 @@ func (e *Encoder) Encode(msg Message) error {
 
 	msgID := msg.Metadata.MessageID
 	if msgID == "" && e.options.AddMessageID {
-		// Example auto-generated message ID logic when enabled
-		msgID = "auto"
+		msgID = ksuid.New().String()
 	}
 
 	// Metadata ('m' TLV) - Encoded as 'k' format: "id:<msgID>"
@@ -151,7 +152,7 @@ func (e *Encoder) EncodeReader(msg Message, r io.Reader, dataLen int) error {
 
 	msgID := msg.Metadata.MessageID
 	if msgID == "" && e.options.AddMessageID {
-		msgID = "auto"
+		msgID = ksuid.New().String()
 	}
 
 	// Metadata ('m' TLV) - Encoded as 'k' format: "id:<msgID>"
