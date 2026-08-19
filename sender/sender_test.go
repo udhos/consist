@@ -21,8 +21,10 @@ import (
 )
 
 // mockS3Client provides a simple mock implementation of sender.S3Client for testing.
+// mu guards the fields below since parts now upload concurrently from separate goroutines.
 type mockS3Client struct {
 	sender.S3Client
+	mu                   sync.Mutex
 	uploadedParts        [][]byte
 	uploadedPartBytes    [][]byte
 	uploadedBytes        [][]byte
@@ -94,6 +96,8 @@ func (m *flushRaceMultipartClient) AbortMultipartUpload(_ context.Context, _ *s3
 }
 
 func (m *mockS3Client) CreateMultipartUpload(_ context.Context, params *s3.CreateMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.injectError != nil {
 		return nil, m.injectError
 	}
@@ -112,13 +116,28 @@ func (m *mockS3Client) UploadPart(_ context.Context, params *s3.UploadPartInput,
 	etag := "mock-etag"
 	if params.Body != nil {
 		buf, _ := io.ReadAll(params.Body)
-		m.uploadedParts = append(m.uploadedParts, buf)
-		m.uploadedPartBytes = append(m.uploadedPartBytes, buf)
+		var partNumber int32 = 1
+		if params.PartNumber != nil {
+			partNumber = *params.PartNumber
+		}
+		idx := int(partNumber - 1)
+		m.mu.Lock()
+		// Parts upload concurrently and may complete out of order, so store
+		// each part at its part-number slot rather than in completion order.
+		for len(m.uploadedParts) <= idx {
+			m.uploadedParts = append(m.uploadedParts, nil)
+			m.uploadedPartBytes = append(m.uploadedPartBytes, nil)
+		}
+		m.uploadedParts[idx] = buf
+		m.uploadedPartBytes[idx] = buf
+		m.mu.Unlock()
 	}
 	return &s3.UploadPartOutput{ETag: &etag}, nil
 }
 
 func (m *mockS3Client) CompleteMultipartUpload(_ context.Context, params *s3.CompleteMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.injectError != nil {
 		return nil, m.injectError
 	}
@@ -330,8 +349,35 @@ func TestSender_MultipartPrefixOnlyOnFirstPart(t *testing.T) {
 }
 
 func (m *mockS3Client) AbortMultipartUpload(_ context.Context, _ *s3.AbortMultipartUploadInput, _ ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.uploadedParts = nil
 	return &s3.AbortMultipartUploadOutput{}, nil
+}
+
+// uploadedPartsCount safely reads the number of parts uploaded so far. Parts
+// now upload in a background goroutine, so callers that need to observe an
+// upload must poll this instead of reading the field directly right after
+// Send() returns.
+func (m *mockS3Client) uploadedPartsCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.uploadedParts)
+}
+
+// waitForCondition polls cond until it returns true or timeout elapses.
+func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if cond() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("condition not met within timeout")
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func TestSender_UsesDocumentedBatchKeyStructure(t *testing.T) {
@@ -633,9 +679,9 @@ func TestSender_MultipartPartUploadDoesNotAckBatch(t *testing.T) {
 	if len(mockClient.keys) != 1 {
 		t.Fatalf("expected multipart upload to start once, got %d keys", len(mockClient.keys))
 	}
-	if len(mockClient.uploadedParts) != 1 {
-		t.Fatalf("expected UploadPart to be called once, got %d uploaded parts in buffer", len(mockClient.uploadedParts))
-	}
+	// UploadPart now runs in a background goroutine, so wait for it instead
+	// of asserting immediately after Send() returns.
+	waitForCondition(t, time.Second, func() bool { return mockClient.uploadedPartsCount() == 1 })
 	if len(mockClient.completedPartNumbers) != 0 {
 		t.Fatalf("expected no complete multipart upload before final batch flush, got %d completed uploads", len(mockClient.completedPartNumbers))
 	}

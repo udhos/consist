@@ -307,6 +307,12 @@ func randomBatchSuffix() string {
 	return ksuid.New().String()
 }
 
+// uploadCurrentPart hands the accumulated batch buffer off for upload and
+// returns immediately without waiting for the S3 round trip. The actual
+// network call runs in a separate goroutine (see uploadPartAsync) so the
+// producer that filled the part never blocks on network I/O; upload
+// concurrency is therefore not limited by the number of producer goroutines.
+// Callers must hold stateMu; it stays held for the caller's remaining work.
 func (s *Sender) uploadCurrentPart(ctx context.Context) error {
 	if s.batchBuf.Len() == 0 {
 		return nil
@@ -325,9 +331,16 @@ func (s *Sender) uploadCurrentPart(ctx context.Context) error {
 	s.uploadGate.RLock()
 	s.uploadWG.Add(1)
 
-	// Keep encoding and batch state protected, but allow independent S3 parts
-	// to upload concurrently.
-	s.stateMu.Unlock()
+	go s.uploadPartAsync(ctx, partNum, payload)
+
+	return nil
+}
+
+// uploadPartAsync performs the S3 UploadPart call and records its outcome.
+// Runs without stateMu held except while updating shared completion state.
+func (s *Sender) uploadPartAsync(ctx context.Context, partNum int32, payload []byte) {
+	defer s.uploadGate.RUnlock()
+	defer s.uploadWG.Done()
 
 	out, err := s.options.Client.UploadPart(ctx, &s3.UploadPartInput{
 		Bucket:     &s.options.Bucket,
@@ -336,22 +349,20 @@ func (s *Sender) uploadCurrentPart(ctx context.Context) error {
 		PartNumber: &partNum,
 		Body:       bytes.NewReader(payload),
 	})
+
 	s.stateMu.Lock()
-	s.uploadWG.Done()
-	s.uploadGate.RUnlock()
+	defer s.stateMu.Unlock()
 	if err != nil {
 		if s.uploadErr == nil {
 			s.uploadErr = err
 		}
-		return err
+		return
 	}
 
 	s.completed = append(s.completed, types.CompletedPart{
 		ETag:       out.ETag,
 		PartNumber: &partNum,
 	})
-
-	return nil
 }
 
 func (s *Sender) waitForUploads() {
