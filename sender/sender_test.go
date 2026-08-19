@@ -980,16 +980,6 @@ func errorsIsEOF(err error) bool {
 	return err != nil && err.Error() == "EOF"
 }
 
-/*
-go test -bench='^BenchmarkSender_Send_10k_10KB$' -benchmem ./sender
-goos: linux
-goarch: amd64
-pkg: github.com/udhos/consist/sender
-cpu: 13th Gen Intel(R) Core(TM) i7-1360P
-BenchmarkSender_Send_10k_10KB-16    	      21	  50836591 ns/op	1967.09 MB/s	184082517 B/op	   10094 allocs/op
-PASS
-ok  	github.com/udhos/consist/sender	1.696s
-*/
 // benchS3Client is a minimal S3 mock for benchmarking. Unlike mockS3Client, it
 // discards uploaded data instead of retaining it in ever-growing slices, so
 // memory/CPU cost stays constant across b.Loop() iterations.
@@ -1016,6 +1006,16 @@ func (*benchS3Client) AbortMultipartUpload(_ context.Context, _ *s3.AbortMultipa
 	return &s3.AbortMultipartUploadOutput{}, nil
 }
 
+/*
+go test -bench='^BenchmarkSender_Send_10k_10KB$' -benchmem ./sender
+goos: linux
+goarch: amd64
+pkg: github.com/udhos/consist/sender
+cpu: 13th Gen Intel(R) Core(TM) i7-1360P
+BenchmarkSender_Send_10k_10KB-16    	      21	  50836591 ns/op	1967.09 MB/s	184082517 B/op	   10094 allocs/op
+PASS
+ok  	github.com/udhos/consist/sender	1.696s
+*/
 func BenchmarkSender_Send_10k_10KB(b *testing.B) {
 	mockClient := &benchS3Client{}
 	payload := make([]byte, 10000)
