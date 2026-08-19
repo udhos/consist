@@ -43,7 +43,7 @@ type Options struct {
     MaxBatchBytes    int           // Max bytes per batch before flush (default: 100MB)
     MaxBatchTime     time.Duration // Max duration a batch can remain open before flush (default: 1s)
     MaxClientSilence time.Duration // Max inactivity duration after Send() before flush (default: 500ms)
-    MinPartBytes     int           // Minimum accumulated buffer size before uploading a multipart part (default: 25MB)
+    MinPartBytes     int           // Minimum accumulated buffer size before uploading a multipart part (default: 10MB)
 }
 ```
 
@@ -51,7 +51,7 @@ Default values applied when unspecified or zero:
 - `MaxBatchBytes`: `100 * 1024 * 1024` (100 MB)
 - `MaxBatchTime`: `1 * time.Second` (1 second)
 - `MaxClientSilence`: `500 * time.Millisecond` (500 milliseconds)
-- `MinPartBytes`: `25 * 1024 * 1024` (25 MB)
+- `MinPartBytes`: `10 * 1024 * 1024` (10 MB) — smaller parts sustain more concurrent in-flight uploads to S3 and roughly double measured throughput versus a 25MB part size; see benchmark below.
 
 #### `S3Client`
 Minimal S3 interface used by `Sender` for upload operations.
@@ -111,15 +111,24 @@ The first three cases are automatic batch flush conditions. `Close(ctx)` is a co
 # Best benchmark so far
 
 - EC2 instance type: c5.2xlarge (8 vCPU, 16 GiB RAM, up to 10 Gbps network)
-- Producers: 8 or 16
-- Multipart part size: 25 MB
+- Producers: 32
+- Multipart part size: 10 MiB (default `MinPartBytes`)
+
+Raw sustained network throughput between two instances in the same VPC/AZ was
+independently measured at ~9.9 Gbps (1.24 GB/s) using `goben`, and raw
+`aws s3 cp` (8MB chunks, 10 concurrent requests) sustained ~450-540 MB/s. A
+25 MB part size capped this Sender at ~215-240 MB/s regardless of CPU,
+signing/checksum overhead, HTTP/2, or producer count (all independently ruled
+out). Reducing part size to 8-10 MiB, closer to aws-cli's default chunk size,
+lets more independent part uploads stay in flight concurrently and roughly
+doubles sustained throughput, matching or beating `aws s3 cp`.
 
 ```bash
 AWS_REGION=sa-east-1 CONSIST_BENCH_BUCKET=bucketname \
     go test ./sender \
         -run='^$' \
-        -bench='^BenchmarkSender_SustainedAWS_Producers_25MBPart$' \
-        -benchtime=20s \
+        -bench='^BenchmarkSender_SustainedAWS_SmallParts$' \
+        -benchtime=10s \
         -count=1 \
         -benchmem
 
@@ -127,14 +136,13 @@ goos: linux
 goarch: amd64
 pkg: github.com/udhos/consist/sender
 cpu: Intel(R) Xeon(R) Platinum 8275CL CPU @ 3.00GHz
-BenchmarkSender_SustainedAWS_Producers_25MBPart/producers_8-8
-
-	3036224             46892 ns/op         218.37 MB/s       10337 B/op          1 allocs/op
-
-BenchmarkSender_SustainedAWS_Producers_25MBPart/producers_16-8
-
-	3030388             47047 ns/op         217.65 MB/s       10335 B/op          1 allocs/op
-
+BenchmarkSender_SustainedAWS_SmallParts/part_8MiB/producers_16-8      592688   22160 ns/op   462.10 MB/s   1414 B/op   2 allocs/op
+BenchmarkSender_SustainedAWS_SmallParts/part_8MiB/producers_32-8      996882   20780 ns/op   492.79 MB/s    970 B/op   2 allocs/op
+BenchmarkSender_SustainedAWS_SmallParts/part_8MiB/producers_64-8      719689   21288 ns/op   481.01 MB/s   1339 B/op   2 allocs/op
+BenchmarkSender_SustainedAWS_SmallParts/part_10MiB/producers_16-8     713720   20413 ns/op   501.65 MB/s   1189 B/op   1 allocs/op
+BenchmarkSender_SustainedAWS_SmallParts/part_10MiB/producers_32-8     720048   20964 ns/op   488.44 MB/s   1180 B/op   1 allocs/op
+BenchmarkSender_SustainedAWS_SmallParts/part_10MiB/producers_64-8     914578   21040 ns/op   486.69 MB/s   1063 B/op   1 allocs/op
 PASS
-ok      github.com/udhos/consist/sender 383.536s
+ok      github.com/udhos/consist/sender 105.308s
 ```
+

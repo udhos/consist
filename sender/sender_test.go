@@ -3,6 +3,7 @@ package sender_test
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -1315,28 +1316,22 @@ ok      github.com/udhos/consist/sender 100.163s
 
 # ------------
 
-	AWS_REGION=sa-east-1 CONSIST_BENCH_BUCKET=bucketname \
+	AWS_REGION=sa-east-1 CONSIST_BENCH_BUCKET=pulsix-br \
 		go test ./sender \
-		  -run='^$' \
-		  -bench='^BenchmarkSender_SustainedAWS_Producers_25MBPart$' \
-		  -benchtime=120s \
-		  -count=1 \
-		  -benchmem
+			-run='^$' \
+			-bench='^BenchmarkSender_SustainedAWS_Producers_25MBPart$' \
+			-benchtime=20s \
+			-count=1 \
+			-benchmem
 
 goos: linux
 goarch: amd64
 pkg: github.com/udhos/consist/sender
 cpu: Intel(R) Xeon(R) Platinum 8275CL CPU @ 3.00GHz
-BenchmarkSender_SustainedAWS_Producers_25MBPart/producers_8-8
-
-	3036224             46892 ns/op         218.37 MB/s       10337 B/op          1 allocs/op
-
-BenchmarkSender_SustainedAWS_Producers_25MBPart/producers_16-8
-
-	3030388             47047 ns/op         217.65 MB/s       10335 B/op          1 allocs/op
-
+BenchmarkSender_SustainedAWS_Producers_25MBPart/producers_8-8            1000000             42613 ns/op         240.30 MB/s         725 B/op 1 allocs/op
+BenchmarkSender_SustainedAWS_Producers_25MBPart/producers_16-8           1000000             42492 ns/op         240.98 MB/s         804 B/op 1 allocs/op
 PASS
-ok      github.com/udhos/consist/sender 383.536s
+ok      github.com/udhos/consist/sender 88.087s
 */
 func BenchmarkSender_SustainedAWS_Producers_25MBPart(b *testing.B) {
 	bucket := os.Getenv("CONSIST_BENCH_BUCKET")
@@ -1816,5 +1811,324 @@ func BenchmarkSender_SustainedAWS_Producers_10MBPart(b *testing.B) {
 			default:
 			}
 		})
+	}
+}
+
+/*
+The SDK's default transport sets ForceAttemptHTTP2, which lets Go's
+http.Transport multiplex many concurrent requests over a small number of
+TCP connections instead of opening one per request. S3 can effectively
+rate-limit per connection, so fewer connections can mean less aggregate
+throughput regardless of producer/goroutine count. This variant disables
+HTTP/2 negotiation (TLSNextProto) to force one TCP connection per
+concurrent request. Result: no measurable difference from HTTP/2 (both
+settled around 6-7 concurrent connections and ~235 MB/s), ruling out
+HTTP/2 multiplexing as the throughput-limiting factor.
+
+	AWS_REGION=sa-east-1 CONSIST_BENCH_BUCKET=bucketname \
+		go test ./sender \
+		  -run='^$' \
+		  -bench='^BenchmarkSender_SustainedAWS_Producers_25MBPart_HTTP1$' \
+		  -benchtime=20s \
+		  -count=1 \
+		  -benchmem
+*/
+func BenchmarkSender_SustainedAWS_Producers_25MBPart_HTTP1(b *testing.B) {
+	bucket := os.Getenv("CONSIST_BENCH_BUCKET")
+	if bucket == "" {
+		b.Skip("set CONSIST_BENCH_BUCKET")
+	}
+
+	ctx := context.Background()
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ForceAttemptHTTP2 = false
+	transport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
+	transport.MaxIdleConnsPerHost = 64
+	transport.MaxConnsPerHost = 0
+
+	awsConfig, err := config.LoadDefaultConfig(ctx, config.WithHTTPClient(&http.Client{
+		Transport: transport,
+	}))
+	if err != nil {
+		b.Fatal(err)
+	}
+	client := s3.NewFromConfig(awsConfig, func(o *s3.Options) {
+		o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+		o.APIOptions = append(o.APIOptions, v4signer.SwapComputePayloadSHA256ForUnsignedPayloadMiddleware)
+	})
+	payload := make([]byte, 10*1024)
+
+	for _, producers := range []int{8, 16} {
+		b.Run(fmt.Sprintf("producers_%d", producers), func(b *testing.B) {
+			s, err := sender.NewSender(sender.Options{
+				Client:        client,
+				Bucket:        bucket,
+				Prefix:        "consist-bench/producers",
+				MaxBatchBytes: 100 * 1024 * 1024,
+				MinPartBytes:  25 * 1024 * 1024,
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			resultErr := make(chan error, 1)
+			resultsDone := make(chan struct{})
+			go func() {
+				defer close(resultsDone)
+				for result := range s.Results() {
+					if result.Err != nil {
+						select {
+						case resultErr <- result.Err:
+						default:
+						}
+					}
+				}
+			}()
+
+			b.SetBytes(int64(len(payload)))
+			b.ResetTimer()
+			var wg sync.WaitGroup
+			producerErr := make(chan error, producers)
+			for producer := range producers {
+				wg.Add(1)
+				go func(producer int) {
+					defer wg.Done()
+					reader := bytes.NewReader(payload)
+					for i := producer; i < b.N; i += producers {
+						reader.Reset(payload)
+						if _, err := s.Send(reader); err != nil {
+							producerErr <- err
+							return
+						}
+					}
+				}(producer)
+			}
+			wg.Wait()
+			b.StopTimer()
+
+			select {
+			case err := <-producerErr:
+				b.Fatal(err)
+			default:
+			}
+			if err := s.Close(ctx); err != nil {
+				b.Fatal(err)
+			}
+			<-resultsDone
+			select {
+			case err := <-resultErr:
+				b.Fatal(err)
+			default:
+			}
+		})
+	}
+}
+
+/*
+Tests whether the ~6-7 concurrent connection ceiling observed at 8/16
+producers is a natural equilibrium that grows with more offered load, or
+a hard limit. Result: 64 producers still settled around 7-8 connections
+and ~239 MB/s, no better than 8 or 16 producers - ruling out client-side
+concurrency/goroutine count as the limiting factor.
+
+	AWS_REGION=sa-east-1 CONSIST_BENCH_BUCKET=bucketname \
+		go test ./sender \
+		  -run='^$' \
+		  -bench='^BenchmarkSender_SustainedAWS_Producers_25MBPart_HighConcurrency$' \
+		  -benchtime=20s \
+		  -count=1 \
+		  -benchmem
+*/
+func BenchmarkSender_SustainedAWS_Producers_25MBPart_HighConcurrency(b *testing.B) {
+	bucket := os.Getenv("CONSIST_BENCH_BUCKET")
+	if bucket == "" {
+		b.Skip("set CONSIST_BENCH_BUCKET")
+	}
+
+	ctx := context.Background()
+	awsConfig, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		b.Fatal(err)
+	}
+	client := s3.NewFromConfig(awsConfig, func(o *s3.Options) {
+		o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+		o.APIOptions = append(o.APIOptions, v4signer.SwapComputePayloadSHA256ForUnsignedPayloadMiddleware)
+	})
+	payload := make([]byte, 10*1024)
+
+	for _, producers := range []int{64} {
+		b.Run(fmt.Sprintf("producers_%d", producers), func(b *testing.B) {
+			s, err := sender.NewSender(sender.Options{
+				Client:        client,
+				Bucket:        bucket,
+				Prefix:        "consist-bench/producers",
+				MaxBatchBytes: 100 * 1024 * 1024,
+				MinPartBytes:  25 * 1024 * 1024,
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			resultErr := make(chan error, 1)
+			resultsDone := make(chan struct{})
+			go func() {
+				defer close(resultsDone)
+				for result := range s.Results() {
+					if result.Err != nil {
+						select {
+						case resultErr <- result.Err:
+						default:
+						}
+					}
+				}
+			}()
+
+			b.SetBytes(int64(len(payload)))
+			b.ResetTimer()
+			var wg sync.WaitGroup
+			producerErr := make(chan error, producers)
+			for producer := range producers {
+				wg.Add(1)
+				go func(producer int) {
+					defer wg.Done()
+					reader := bytes.NewReader(payload)
+					for i := producer; i < b.N; i += producers {
+						reader.Reset(payload)
+						if _, err := s.Send(reader); err != nil {
+							producerErr <- err
+							return
+						}
+					}
+				}(producer)
+			}
+			wg.Wait()
+			b.StopTimer()
+
+			select {
+			case err := <-producerErr:
+				b.Fatal(err)
+			default:
+			}
+			if err := s.Close(ctx); err != nil {
+				b.Fatal(err)
+			}
+			<-resultsDone
+			select {
+			case err := <-resultErr:
+				b.Fatal(err)
+			default:
+			}
+		})
+	}
+}
+
+/*
+BenchmarkSender_SustainedAWS_SmallParts tests smaller MinPartBytes values
+(closer to aws-cli's 8MB default chunksize) across higher producer counts,
+to see if more numerous, smaller, independent part uploads achieve better
+aggregate concurrency/throughput to S3 than fewer large 25MB parts.
+Result: 8-10 MiB parts roughly double throughput versus 25MB parts,
+confirming S3 throughput scales with concurrent request count rather
+than request size. This informed the package's new default MinPartBytes.
+
+	AWS_REGION=sa-east-1 CONSIST_BENCH_BUCKET=bucketname \
+		go test ./sender \
+		  -run='^$' \
+		  -bench='^BenchmarkSender_SustainedAWS_SmallParts$' \
+		  -benchtime=10s \
+		  -count=1 \
+		  -benchmem
+*/
+func BenchmarkSender_SustainedAWS_SmallParts(b *testing.B) {
+	bucket := os.Getenv("CONSIST_BENCH_BUCKET")
+	if bucket == "" {
+		b.Skip("set CONSIST_BENCH_BUCKET")
+	}
+
+	ctx := context.Background()
+	awsConfig, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		b.Fatal(err)
+	}
+	client := s3.NewFromConfig(awsConfig, func(o *s3.Options) {
+		o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+		o.APIOptions = append(o.APIOptions, v4signer.SwapComputePayloadSHA256ForUnsignedPayloadMiddleware)
+	})
+	payload := make([]byte, 10*1024)
+
+	partSizes := []struct {
+		name  string
+		bytes int
+	}{
+		{"part_8MiB", 8 * 1024 * 1024},
+		{"part_10MiB", 10 * 1024 * 1024},
+	}
+	producerCounts := []int{16, 32, 64}
+
+	for _, ps := range partSizes {
+		for _, producers := range producerCounts {
+			b.Run(fmt.Sprintf("%s/producers_%d", ps.name, producers), func(b *testing.B) {
+				s, err := sender.NewSender(sender.Options{
+					Client:        client,
+					Bucket:        bucket,
+					Prefix:        "consist-bench/smallparts",
+					MaxBatchBytes: 200 * 1024 * 1024,
+					MinPartBytes:  ps.bytes,
+				})
+				if err != nil {
+					b.Fatal(err)
+				}
+
+				resultErr := make(chan error, 1)
+				resultsDone := make(chan struct{})
+				go func() {
+					defer close(resultsDone)
+					for result := range s.Results() {
+						if result.Err != nil {
+							select {
+							case resultErr <- result.Err:
+							default:
+							}
+						}
+					}
+				}()
+
+				b.SetBytes(int64(len(payload)))
+				b.ResetTimer()
+				var wg sync.WaitGroup
+				producerErr := make(chan error, producers)
+				for producer := range producers {
+					wg.Add(1)
+					go func(producer int) {
+						defer wg.Done()
+						reader := bytes.NewReader(payload)
+						for i := producer; i < b.N; i += producers {
+							reader.Reset(payload)
+							if _, err := s.Send(reader); err != nil {
+								producerErr <- err
+								return
+							}
+						}
+					}(producer)
+				}
+				wg.Wait()
+				b.StopTimer()
+
+				select {
+				case err := <-producerErr:
+					b.Fatal(err)
+				default:
+				}
+				if err := s.Close(ctx); err != nil {
+					b.Fatal(err)
+				}
+				<-resultsDone
+				select {
+				case err := <-resultErr:
+					b.Fatal(err)
+				default:
+				}
+			})
+		}
 	}
 }
