@@ -937,12 +937,38 @@ goos: linux
 goarch: amd64
 pkg: github.com/udhos/consist/sender
 cpu: 13th Gen Intel(R) Core(TM) i7-1360P
-BenchmarkSender_Send_10k_10KB-16    	       6	 171714828 ns/op	 582.36 MB/s	696206173 B/op	   10238 allocs/op
+BenchmarkSender_Send_10k_10KB-16    	      21	  50836591 ns/op	1967.09 MB/s	184082517 B/op	   10094 allocs/op
 PASS
-ok  	github.com/udhos/consist/sender	1.688s
+ok  	github.com/udhos/consist/sender	1.696s
 */
+// benchS3Client is a minimal S3 mock for benchmarking. Unlike mockS3Client, it
+// discards uploaded data instead of retaining it in ever-growing slices, so
+// memory/CPU cost stays constant across b.Loop() iterations.
+type benchS3Client struct{}
+
+func (*benchS3Client) CreateMultipartUpload(_ context.Context, _ *s3.CreateMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error) {
+	uploadID := "bench-upload-id"
+	return &s3.CreateMultipartUploadOutput{UploadId: &uploadID}, nil
+}
+
+func (*benchS3Client) UploadPart(_ context.Context, params *s3.UploadPartInput, _ ...func(*s3.Options)) (*s3.UploadPartOutput, error) {
+	if params.Body != nil {
+		_, _ = io.Copy(io.Discard, params.Body)
+	}
+	etag := "bench-etag"
+	return &s3.UploadPartOutput{ETag: &etag}, nil
+}
+
+func (*benchS3Client) CompleteMultipartUpload(_ context.Context, _ *s3.CompleteMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error) {
+	return &s3.CompleteMultipartUploadOutput{}, nil
+}
+
+func (*benchS3Client) AbortMultipartUpload(_ context.Context, _ *s3.AbortMultipartUploadInput, _ ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
+	return &s3.AbortMultipartUploadOutput{}, nil
+}
+
 func BenchmarkSender_Send_10k_10KB(b *testing.B) {
-	mockClient := &mockS3Client{}
+	mockClient := &benchS3Client{}
 	payload := make([]byte, 10000)
 	for i := range payload {
 		payload[i] = byte(i % 256)
