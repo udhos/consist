@@ -208,21 +208,30 @@ func TestDecodeTruncatedStream(t *testing.T) {
 	}
 }
 
+/*
+go test -bench='^BenchmarkEncode10kRecords10kBytes$' -benchmem ./wagon
+goos: linux
+goarch: amd64
+pkg: github.com/udhos/consist/wagon
+cpu: 13th Gen Intel(R) Core(TM) i7-1360P
+BenchmarkEncode10kRecords10kBytes-16    	      34	  34687733 ns/op	2882.86 MB/s	301543689 B/op	   10008 allocs/op
+PASS
+ok  	github.com/udhos/consist/wagon	2.492s
+*/
 func BenchmarkEncode10kRecords10kBytes(b *testing.B) {
 	payload := make([]byte, 10000)
 	for i := range payload {
 		payload[i] = 'a'
 	}
 	msg := Message{
-		Metadata:   Metadata{MessageID: "msg-1234567890"},
+		//Metadata:   Metadata{MessageID: "msg-1234567890"},
 		Attributes: map[string]string{"env": "production", "region": "us-east-1"},
 		Data:       payload,
 	}
 
-	b.ResetTimer()
 	b.SetBytes(int64(10000 * len(payload)))
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		var buf bytes.Buffer
 		buf.Grow(10000 * 10050) // pre-allocate ~100MB buffer
 		enc, err := NewEncoder(&buf)

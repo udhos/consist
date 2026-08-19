@@ -932,18 +932,14 @@ func errorsIsEOF(err error) bool {
 }
 
 /*
-$ go test -bench='^BenchmarkSender_Send_10k_10KB$' -benchmem -count=5 ./sender
+go test -bench='^BenchmarkSender_Send_10k_10KB$' -benchmem ./sender
 goos: linux
 goarch: amd64
 pkg: github.com/udhos/consist/sender
 cpu: 13th Gen Intel(R) Core(TM) i7-1360P
-BenchmarkSender_Send_10k_10KB-16    	       8	 148058207 ns/op	 675.41 MB/s	847424720 B/op	   10442 allocs/op
-BenchmarkSender_Send_10k_10KB-16    	       8	 141890268 ns/op	 704.77 MB/s	847424752 B/op	   10441 allocs/op
-BenchmarkSender_Send_10k_10KB-16    	       9	 151272966 ns/op	 661.06 MB/s	847424613 B/op	   10441 allocs/op
-BenchmarkSender_Send_10k_10KB-16    	       8	 147615572 ns/op	 677.44 MB/s	847424682 B/op	   10441 allocs/op
-BenchmarkSender_Send_10k_10KB-16    	      10	 156430167 ns/op	 639.26 MB/s	847424333 B/op	   10441 allocs/op
+BenchmarkSender_Send_10k_10KB-16    	       6	 171714828 ns/op	 582.36 MB/s	696206173 B/op	   10238 allocs/op
 PASS
-ok  	github.com/udhos/consist/sender	12.409s
+ok  	github.com/udhos/consist/sender	1.688s
 */
 func BenchmarkSender_Send_10k_10KB(b *testing.B) {
 	mockClient := &mockS3Client{}
@@ -953,9 +949,8 @@ func BenchmarkSender_Send_10k_10KB(b *testing.B) {
 	}
 
 	b.ReportAllocs()
-	b.ResetTimer()
 
-	for n := 0; n < b.N; n++ {
+	for b.Loop() {
 		s, err := sender.NewSender(sender.Options{
 			Client:        mockClient,
 			Bucket:        "bench-bucket",
