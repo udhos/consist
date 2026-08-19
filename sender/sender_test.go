@@ -1351,12 +1351,23 @@ func BenchmarkSender_SustainedAWS_Producers_25MBPart(b *testing.B) {
 
 /*
 	AWS_REGION=sa-east-1 CONSIST_BENCH_BUCKET=bucketname \
-		go test ./sender \
-		  -run='^$' \
-		  -bench='^BenchmarkSender_SustainedAWS_Producers_25MBPart' \
-		  -benchtime=20s \
-		  -count=1 \
-		  -benchmem
+	    go test ./sender \
+	        -run='^$' \
+	        -bench='^BenchmarkSender_SustainedAWS_Producers_25MBPart' \
+	        -benchtime=20s \
+	        -count=1 \
+	        -benchmem
+
+goos: linux
+goarch: amd64
+pkg: github.com/udhos/consist/sender
+cpu: Intel(R) Xeon(R) Platinum 8275CL CPU @ 3.00GHz
+BenchmarkSender_SustainedAWS_Producers_25MBPart/producers_8-8             522032             48695 ns/op         210.29 MB/s       10491 B/op 1 allocs/op
+BenchmarkSender_SustainedAWS_Producers_25MBPart/producers_16-8            551214             47637 ns/op         214.96 MB/s       10462 B/op 1 allocs/op
+BenchmarkSender_SustainedAWS_Producers_25MBPart_CustomTransport/producers_8-8             547948             48074 ns/op         213.00 MB/s       10480 B/op        1 allocs/op
+BenchmarkSender_SustainedAWS_Producers_25MBPart_CustomTransport/producers_16-8            540452             47619 ns/op         215.04 MB/s       10492 B/op        1 allocs/op
+PASS
+ok      github.com/udhos/consist/sender 109.914s
 */
 func BenchmarkSender_SustainedAWS_Producers_25MBPart_CustomTransport(b *testing.B) {
 	bucket := os.Getenv("CONSIST_BENCH_BUCKET")
