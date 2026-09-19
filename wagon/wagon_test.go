@@ -445,10 +445,9 @@ func BenchmarkDecode10kRecords10kBytes(b *testing.B) {
 	}
 	encodedBytes := buf.Bytes()
 
-	b.ResetTimer()
 	b.SetBytes(int64(10000 * len(payload)))
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		reader := bytes.NewReader(encodedBytes)
 		dec, err := NewDecoder(reader)
 		if err != nil {
